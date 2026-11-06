@@ -1,0 +1,79 @@
+# Seeded random walk through the Burrow (random.seed(7)): Flipendo on the glass jar, the
+# Magical Measurer, Fred and George, the Remembrall tutorial panel (frame ~9800).
+450 press A
+520 press DOWN 4
+540 press DOWN 4
+560 press DOWN 4
+600 press A
+700 press A
+6000 stick L 1 0 90
+6095 press X
+6135 stick L 0.7 0.7 52
+6192 stick L 0 1 156
+6353 stick L 0 1 51
+6409 stick L 0 1 70
+6484 stick L 0 -1 47
+6536 press A
+6576 stick L 1 0 120
+6701 press X
+6741 press B
+6781 press X
+6821 stick L 1 0 45
+6871 press X
+6911 stick L 0 -1 58
+6974 stick L 0.7 0.7 79
+7058 press X
+7098 press X
+7138 stick L 0.7 0.7 121
+7264 stick L 0 1 110
+7379 press X
+7419 press X
+7459 press X
+7499 stick L 0.7 0.7 94
+7598 press A
+7638 stick L 0 -1 86
+7729 stick L 1 0 129
+7863 press A
+7903 stick L -1 0 107
+8015 stick L -1 0 133
+8153 stick L 0.7 0.7 49
+8207 stick L 0 -1 61
+8273 press A
+8313 stick L 0 -1 93
+8411 stick L -0.7 0.7 49
+8465 press A
+8505 press X
+8545 stick R 1 0 40
+8590 stick L -1 0 116
+8711 stick L 0 -1 48
+8764 press A
+8804 press B
+8844 stick L -0.7 0.7 48
+8897 stick L -0.7 0.7 79
+8981 press X
+9021 press B
+9061 press A
+9101 stick L 0 -1 153
+9259 press X
+9299 stick L 0 -1 85
+9389 stick L 0 1 103
+9497 stick L -1 0 56
+9558 press X
+9598 stick L 0 -1 50
+9653 stick L 0 -1 110
+9768 stick L 1 0 144
+9917 stick L 0.7 0.7 75
+9997 press X
+10037 press B
+10077 press X
+10117 stick L 1 0 59
+10181 stick L 1 0 69
+10255 press X
+10295 stick L 0.7 0.7 63
+10363 stick L 0 1 58
+10426 stick L -1 0 118
+10549 press X
+10589 press B
+10629 press X
+10669 stick L 0.7 0.7 123
+10797 press X

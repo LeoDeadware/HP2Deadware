@@ -1,0 +1,19 @@
+# Glyphs added to the font .geo files for the Ukrainian overlay (tools/loc/build_mod.py).
+# Ukrainian alphabet, typographic extras.
+chars АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ абвгґдеєжзиіїйклмнопрстуфхцчшщьюя ʼ’«»№—
+# Cyrillic letters drawn with the existing Latin glyph (same shape).
+reuse AА BВ EЕ IІ KК MМ HН OО PР CС TТ XХ aа eе iі oо pр cс yу xх
+# panel.geo: font 0 = 28/29 px serif (dialogue, menus), font 1 = 23 px humanist sans.
+geo panel.geo Times New Roman;GillSans-SemiBold
+# inv_font.geo: bronze serif capitals (inventory titles; lowercase -> capitals).
+geo inv_font.geo Times New Roman Bold
+# titlemap.geo: gold title font (menu headings, Select/Exit); lowercase are small capitals.
+geo titlemap.geo Georgia Bold
+# Language picker: the UK flag (titlemap.geo texture 5, the _UK slot = Ukrainian)
+# becomes the Ukrainian flag (official colours: blue #0057B7 over yellow #FFD700).
+flag titlemap.geo 5 #0057B7 #FFD700
+# Hybrid picker slot (Kernel turns the FRA row into it, folder "ukt"):
+# Ukrainian text with the original English speech. Its flag (titlemap.geo
+# texture 6, the FRA flag) = Union Jack | Ukrainian flag, labelled Sound | Текст.
+splitflag titlemap.geo 6 Georgia Bold;Sound;Текст
+hybrid _UKT

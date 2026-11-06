@@ -1,0 +1,17 @@
+# Pick Ukrainian in the game's own picker (tests/scripts/loc_pick_persist.sh):
+# main menu -> Options -> language row -> RIGHT (US -> UA) -> A, back to the
+# main menu, New Game -> Continue Without Saving -> Burrow (as test_page.pad).
+450 press DOWN
+480 press A
+580 press UP
+600 press A
+700 press RIGHT
+780 press A
+950 press B
+1000 press UP
+1030 press A
+1100 press DOWN 4
+1120 press DOWN 4
+1140 press DOWN 4
+1180 press A
+1280 press A

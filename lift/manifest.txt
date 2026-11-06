@@ -1,0 +1,25 @@
+# Lifter manifest for default.xbe (NTSC-US, XDK 5028). Directives: entry,
+# name, resume, setjmp, probe, replace (x86recomp tools/lifter/program.cpp).
+# Changing this file changes the lift_id (lift/lift.sh).
+
+# ---- Structured exceptions (MSVC CRT, linked statically) -----------------
+# The kernel HLE's RtlRaiseException walks the fs:[0] chain and calls these
+# handlers lifted. An __except block is entered by __except_handler3 with a
+# call that never returns (the block starts with `mov esp, [ebp-18h]` and
+# continues in its function's frame): that call is a resume site, caught by
+# the function owning the frame (it writes fs:[0] via __SEH_prolog).
+entry  0012B508 __except_handler3
+sehprolog 00127D40 __SEH_prolog  # its callers own the frame: resumable
+name   00127D7B __SEH_epilog
+name   00127D8C __global_unwind2
+name   00127DCE __local_unwind2
+resume 0012B58B
+
+# ---- C++ exceptions (_CxxThrowException -> RtlRaiseException E06D7363) ----
+# _JumpToContinuation restores the catching frame's ebp/esp and jumps to the
+# code after the catch block (`jmp eax`).
+name   0012856F _JumpToContinuation
+resume 00128598
+name   001285F8 ___CxxFrameHandler
+
+# No setjmp/longjmp in this executable (no __setjmp3; checked 2026-10-30).

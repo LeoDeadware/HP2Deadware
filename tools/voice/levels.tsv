@@ -1,0 +1,14 @@
+# Intended Ukrainian loudness relative to the English line each clip replaces (dB).
+# bank: * = every line of that speaker; a bank name = that scene; a wav name = one clip.
+# Playtest of beta f62594f (2026-11-01): Harry too loud; the narrator too quiet; in the
+# Burrow opening (CS_BU) Molly scolding is drowned by the kids.
+speaker	bank	gain_db
+HRY	*	-1.0
+NAR	*	+1.5
+MOL	*	+1.0
+MOL	SV_MOL_BUR03_0001B	+2.0
+MOL	SV_MOL_BUR03_0002B	+2.0
+FRD	SV_FRD_BUR03_0001B	-2.0
+GRG	SV_GRG_BUR03_0001E	-2.0
+RON	SV_RON_BUR03_0002C	-2.0
+RON	SV_RON_BUR03_0003	-2.0

@@ -1,0 +1,14 @@
+# HP2_PAD_SCRIPT for phase3_first_level.sh (XInput HLE syntax: src/hle/xinput/pad_script.h).
+# Frames = presented frames (D3D Swap count), movies skipped.
+# Main menu: New Game -> save slots: Continue Without Saving -> confirm Yes.
+450 press A
+520 press DOWN 4
+540 press DOWN 4
+560 press DOWN 4
+600 press A
+700 press A
+# Gameplay: walk, then pause (START) for ~5 s, resume, walk.
+6000 stick L 0 1 200
+6300 press START
+6600 press START
+6700 stick L 0 1 200

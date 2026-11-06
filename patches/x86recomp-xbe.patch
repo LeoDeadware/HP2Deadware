@@ -1,0 +1,1173 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 335e10c..d4cf903 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -57,6 +57,7 @@ endif()
+ add_library(recomp_image SHARED
+   src/runtime/guest_memory.cpp
+   src/runtime/pe_image.cpp
++  src/runtime/xbe_image.cpp
+   src/runtime/unwind.cpp
+   src/runtime/log.cpp)
+ target_include_directories(recomp_image PUBLIC src)
+diff --git a/src/runtime/lifted.h b/src/runtime/lifted.h
+index 5641814..3adcadc 100644
+--- a/src/runtime/lifted.h
++++ b/src/runtime/lifted.h
+@@ -8,6 +8,7 @@
+ #include <cstring>
+ 
+ #include "runtime/ctx.h"
++#include "runtime/mmx.h"
+ #include "runtime/sse.h"
+ #include "runtime/x87.h"
+ 
+diff --git a/src/runtime/mmx.h b/src/runtime/mmx.h
+new file mode 100644
+index 0000000..64573db
+--- /dev/null
++++ b/src/runtime/mmx.h
+@@ -0,0 +1,160 @@
++#pragma once
++// MMX for lifted code: the eight 64-bit MMX registers are the significands
++// of the x87 physical registers R0..R7, as on the CPU. Every MMX
++// instruction (EMMS excepted) puts the x87 unit in MMX state: TOP = 0, all
++// tags valid; a register write also sets that register's sign/exponent to
++// all ones. EMMS marks every register empty. Integer lane arithmetic only,
++// on uint64_t values, little-endian lanes; portable C++ (no intrinsics).
++
++#include <cstdint>
++#include <type_traits>
++
++#include "runtime/ctx.h"
++
++namespace recomp::mmx {
++
++[[gnu::always_inline]] inline void Enter(Ctx& c) {
++  c.fpu.top = 0;
++  c.fpu.empty = 0;
++}
++[[gnu::always_inline]] inline uint64_t Get(const Ctx& c, int i) { return c.fpu.r[i].sig; }
++[[gnu::always_inline]] inline void Set(Ctx& c, int i, uint64_t v) {
++  c.fpu.r[i].sig = v;
++  c.fpu.r[i].se = 0xFFFF;
++}
++[[gnu::always_inline]] inline void Emms(Ctx& c) { c.fpu.empty = 0xFF; }
++
++// ---- lanes ------------------------------------------------------------------
++template <typename T>
++inline T Lane(uint64_t v, int i) {
++  return T(v >> (8 * sizeof(T) * i));
++}
++template <typename T>
++inline uint64_t SetLane(uint64_t v, int i, T x) {
++  const int sh = 8 * sizeof(T) * i;
++  const uint64_t mask = (sizeof(T) == 8 ? ~0ull : ((1ull << (8 * sizeof(T))) - 1)) << sh;
++  using U = std::make_unsigned_t<T>;
++  return (v & ~mask) | (uint64_t(U(x)) << sh);
++}
++// d[i] = f(a[i], b[i]) for every lane of type T.
++template <typename T, typename F>
++inline uint64_t Map2(uint64_t a, uint64_t b, F f) {
++  uint64_t r = 0;
++  for (int i = 0; i < int(8 / sizeof(T)); i++) r = SetLane<T>(r, i, T(f(Lane<T>(a, i), Lane<T>(b, i))));
++  return r;
++}
++template <typename T>
++inline T Sat(int64_t v) {
++  constexpr int64_t lo = std::is_signed_v<T> ? -(int64_t(1) << (8 * sizeof(T) - 1)) : 0;
++  constexpr int64_t hi = std::is_signed_v<T> ? (int64_t(1) << (8 * sizeof(T) - 1)) - 1
++                                             : (int64_t(1) << (8 * sizeof(T))) - 1;
++  return T(v < lo ? lo : v > hi ? hi : v);
++}
++
++// Wrapping, saturating (S signed, US unsigned) add/sub.
++template <typename T> inline uint64_t Add(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return T(x + y); });
++}
++template <typename T> inline uint64_t Sub(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return T(x - y); });
++}
++template <typename T> inline uint64_t AddSat(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return Sat<T>(int64_t(x) + int64_t(y)); });
++}
++template <typename T> inline uint64_t SubSat(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return Sat<T>(int64_t(x) - int64_t(y)); });
++}
++template <typename T> inline uint64_t CmpEq(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return x == y ? T(~T(0)) : T(0); });
++}
++template <typename T> inline uint64_t CmpGt(uint64_t a, uint64_t b) {  // T signed
++  return Map2<T>(a, b, [](T x, T y) { return x > y ? T(~T(0)) : T(0); });
++}
++template <typename T> inline uint64_t Min(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return x < y ? x : y; });
++}
++template <typename T> inline uint64_t Max(uint64_t a, uint64_t b) {
++  return Map2<T>(a, b, [](T x, T y) { return x > y ? x : y; });
++}
++template <typename T> inline uint64_t Avg(uint64_t a, uint64_t b) {  // T unsigned
++  return Map2<T>(a, b, [](T x, T y) { return T((uint32_t(x) + uint32_t(y) + 1) >> 1); });
++}
++inline uint64_t MulLo16(uint64_t a, uint64_t b) {
++  return Map2<int16_t>(a, b, [](int16_t x, int16_t y) { return int16_t(int32_t(x) * y); });
++}
++inline uint64_t MulHi16(uint64_t a, uint64_t b) {
++  return Map2<int16_t>(a, b, [](int16_t x, int16_t y) { return int16_t((int32_t(x) * y) >> 16); });
++}
++inline uint64_t MulHiU16(uint64_t a, uint64_t b) {
++  return Map2<uint16_t>(a, b,
++                        [](uint16_t x, uint16_t y) { return uint16_t((uint32_t(x) * y) >> 16); });
++}
++// PMADDWD: d.dword[i] = a.w[2i]*b.w[2i] + a.w[2i+1]*b.w[2i+1] (wraps only
++// for 0x8000 * 0x8000 twice, as on the CPU).
++inline uint64_t MAddWD(uint64_t a, uint64_t b) {
++  uint64_t r = 0;
++  for (int i = 0; i < 2; i++) {
++    int32_t p0 = int32_t(Lane<int16_t>(a, 2 * i)) * Lane<int16_t>(b, 2 * i);
++    int32_t p1 = int32_t(Lane<int16_t>(a, 2 * i + 1)) * Lane<int16_t>(b, 2 * i + 1);
++    r = SetLane<uint32_t>(r, i, uint32_t(p0) + uint32_t(p1));
++  }
++  return r;
++}
++// PSADBW: sum of absolute byte differences in the low word.
++inline uint64_t SadBW(uint64_t a, uint64_t b) {
++  uint32_t s = 0;
++  for (int i = 0; i < 8; i++) {
++    int d = int(Lane<uint8_t>(a, i)) - int(Lane<uint8_t>(b, i));
++    s += uint32_t(d < 0 ? -d : d);
++  }
++  return s;
++}
++
++// Shifts by a 64-bit count: logical shifts past the lane width give 0,
++// arithmetic ones the sign.
++template <typename T> inline uint64_t Shl(uint64_t a, uint64_t n) {
++  if (n >= 8 * sizeof(T)) return 0;
++  return Map2<T>(a, 0, [n](T x, T) { return T(x << n); });
++}
++template <typename T> inline uint64_t Shr(uint64_t a, uint64_t n) {  // T unsigned
++  if (n >= 8 * sizeof(T)) return 0;
++  return Map2<T>(a, 0, [n](T x, T) { return T(x >> n); });
++}
++template <typename T> inline uint64_t Sar(uint64_t a, uint64_t n) {  // T signed
++  if (n >= 8 * sizeof(T)) n = 8 * sizeof(T) - 1;
++  return Map2<T>(a, 0, [n](T x, T) { return T(x >> n); });
++}
++
++// Unpack: interleave the low (high = false) or high halves, a first.
++template <typename T> inline uint64_t Unpack(uint64_t a, uint64_t b, bool high) {
++  constexpr int n = 8 / sizeof(T);
++  uint64_t r = 0;
++  for (int i = 0; i < n / 2; i++) {
++    int src = high ? n / 2 + i : i;
++    r = SetLane<T>(r, 2 * i, Lane<T>(a, src));
++    r = SetLane<T>(r, 2 * i + 1, Lane<T>(b, src));
++  }
++  return r;
++}
++// Pack with saturation: a's lanes then b's, narrowed from W to N.
++template <typename W, typename N> inline uint64_t Pack(uint64_t a, uint64_t b) {
++  constexpr int n = 8 / sizeof(W);
++  uint64_t r = 0;
++  for (int i = 0; i < n; i++) {
++    r = SetLane<N>(r, i, Sat<N>(Lane<W>(a, i)));
++    r = SetLane<N>(r, n + i, Sat<N>(Lane<W>(b, i)));
++  }
++  return r;
++}
++inline uint64_t ShufW(uint64_t a, uint32_t imm) {
++  uint64_t r = 0;
++  for (int i = 0; i < 4; i++) r = SetLane<uint16_t>(r, i, Lane<uint16_t>(a, (imm >> (2 * i)) & 3));
++  return r;
++}
++inline uint32_t MovMskB(uint64_t a) {
++  uint32_t m = 0;
++  for (int i = 0; i < 8; i++) m |= uint32_t(Lane<uint8_t>(a, i) >> 7) << i;
++  return m;
++}
++
++}  // namespace recomp::mmx
+diff --git a/src/runtime/xbe_image.cpp b/src/runtime/xbe_image.cpp
+new file mode 100644
+index 0000000..2f80a06
+--- /dev/null
++++ b/src/runtime/xbe_image.cpp
+@@ -0,0 +1,172 @@
++#include "runtime/xbe_image.h"
++
++#include <cstring>
++#include <fstream>
++#include <iterator>
++#include <vector>
++
++namespace recomp {
++
++namespace {
++
++constexpr uint32_t kEntryRetail = 0xA8FC57AB, kEntryDebug = 0x94859D4B;
++constexpr uint32_t kThunkRetail = 0x5B6D40B6, kThunkDebug = 0xEFB1F152;
++constexpr uint32_t kSecWritable = 0x1, kSecExecutable = 0x4;
++// PE section characteristics given to XBE sections.
++constexpr uint32_t kScnCode = 0x00000020, kScnExec = 0x20000000,
++                   kScnRead = 0x40000000, kScnWrite = 0x80000000;
++
++template <typename T>
++T Rd(const std::vector<uint8_t>& d, size_t off) {
++  T v{};
++  if (off + sizeof(T) <= d.size()) std::memcpy(&v, d.data() + off, sizeof(T));
++  return v;
++}
++
++}  // namespace
++
++bool IsXbeFile(const std::string& path) {
++  std::ifstream f(path, std::ios::binary);
++  char m[4] = {};
++  f.read(m, 4);
++  return f && std::memcmp(m, "XBEH", 4) == 0;
++}
++
++bool LoadXbe(const std::string& path, GuestMemory& mem, PeImage* img,
++             XbeInfo* info, std::string* err) {
++  *img = PeImage{};
++  *info = XbeInfo{};
++  std::ifstream f(path, std::ios::binary);
++  if (!f) {
++    *err = "cannot open " + path;
++    return false;
++  }
++  std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)),
++                         std::istreambuf_iterator<char>());
++  if (d.size() < 0x180 || std::memcmp(d.data(), "XBEH", 4) != 0) {
++    *err = "not an XBE";
++    return false;
++  }
++  const uint32_t base = Rd<uint32_t>(d, 0x104);
++  const uint32_t headers = Rd<uint32_t>(d, 0x108);
++  img->preferred_base = img->image_base = base;
++  img->image_size = Rd<uint32_t>(d, 0x10C);
++  info->headers_size = headers;
++  info->cert = Rd<uint32_t>(d, 0x118);
++  info->tls_dir = Rd<uint32_t>(d, 0x12C);
++  info->stack_commit = Rd<uint32_t>(d, 0x130);
++  info->heap_reserve = Rd<uint32_t>(d, 0x134);
++  info->heap_commit = Rd<uint32_t>(d, 0x138);
++  img->stack_reserve = info->stack_commit;
++  if (headers > d.size() || uint64_t(base) + img->image_size > mem.size()) {
++    *err = "bad XBE header sizes";
++    return false;
++  }
++  auto file_off = [&](uint32_t va) -> size_t { return va - base; };  // headers only
++
++  if (!mem.Commit(base, img->image_size, Prot::RW)) {
++    *err = "cannot commit the XBE image range";
++    return false;
++  }
++  std::memcpy(mem.ptr(base), d.data(), headers);
++
++  const uint32_t nsec = Rd<uint32_t>(d, 0x11C);
++  const uint32_t sh = Rd<uint32_t>(d, 0x120);
++  for (uint32_t i = 0; i < nsec; i++) {
++    size_t o = file_off(sh) + i * 56;
++    uint32_t flags = Rd<uint32_t>(d, o), va = Rd<uint32_t>(d, o + 4),
++             vsize = Rd<uint32_t>(d, o + 8), raw = Rd<uint32_t>(d, o + 12),
++             rsize = Rd<uint32_t>(d, o + 16), name_va = Rd<uint32_t>(d, o + 20);
++    if (va < base || uint64_t(va) + vsize > uint64_t(base) + img->image_size ||
++        uint64_t(raw) + rsize > d.size() || rsize > vsize) {
++      *err = "section " + std::to_string(i) + " out of range";
++      return false;
++    }
++    PeSection s;
++    size_t no = file_off(name_va);
++    while (no < headers && d[no]) s.name += char(d[no++]);
++    s.va = va;
++    s.vsize = vsize;
++    s.characteristics = kScnRead | ((flags & kSecWritable) ? kScnWrite : 0) |
++                        ((flags & kSecExecutable) ? kScnCode | kScnExec : 0);
++    img->sections.push_back(s);
++    std::memcpy(mem.ptr(va), d.data() + raw, rsize);
++  }
++
++  // Entry point: whichever key puts it inside a section.
++  auto in_section = [&](uint32_t va) {
++    for (const auto& s : img->sections)
++      if (va >= s.va && va < s.va + s.vsize) return true;
++    return false;
++  };
++  uint32_t enc = Rd<uint32_t>(d, 0x128);
++  uint32_t entry = enc ^ kEntryRetail;
++  if (!in_section(entry)) {
++    entry = enc ^ kEntryDebug;
++    info->debug_key = true;
++    if (!in_section(entry)) {
++      *err = "entry point decodes outside every section";
++      return false;
++    }
++  }
++  img->entry = entry;
++  info->kernel_thunk =
++      Rd<uint32_t>(d, 0x158) ^ (info->debug_key ? kThunkDebug : kThunkRetail);
++
++  // Kernel imports, by ordinal.
++  for (uint32_t a = info->kernel_thunk;; a += 4) {
++    if (!in_section(a)) {
++      *err = "kernel thunk table runs out of the image";
++      return false;
++    }
++    uint32_t v = mem.read<uint32_t>(a);
++    if (!v) break;
++    PeImport imp;
++    imp.dll = "xboxkrnl.exe";
++    imp.name = "#" + std::to_string(v & 0x7FFFFFFF);
++    imp.iat_va = a;
++    imp.thunk_va = 0;
++    img->imports.push_back(imp);
++  }
++
++  // Code: executable sections back to back from .text.
++  const PeSection* text = nullptr;
++  for (const auto& s : img->sections)
++    if (s.name == ".text") text = &s;
++  if (!text) {
++    *err = "no .text section";
++    return false;
++  }
++  info->code_lo = text->va;
++  info->code_hi = text->va + text->vsize;
++  // Linkers flag data sections executable too, so the run also ends at the
++  // section holding the kernel thunk table (the start of read-only data)
++  // and at the usual data section names.
++  auto is_data = [&](const PeSection& s) {
++    return s.name == ".rdata" || s.name == ".data" || s.name == ".bss" ||
++           (info->kernel_thunk >= s.va && info->kernel_thunk < s.va + s.vsize);
++  };
++  for (bool grew = true; grew;) {
++    grew = false;
++    for (const auto& s : img->sections)
++      if ((s.characteristics & kScnExec) && !is_data(s) && s.va >= info->code_hi &&
++          s.va - info->code_hi < 0x20) {  // sections are 16/32-byte aligned
++        info->code_hi = s.va + s.vsize;
++        grew = true;
++      }
++  }
++
++  // TLS directory: raw start, raw end, index VA, callbacks, zero fill.
++  // (It may sit in a section or in the header area.)
++  if (info->tls_dir >= base && info->tls_dir + 24 <= base + img->image_size) {
++    img->has_tls = true;
++    img->tls.raw_start = mem.read<uint32_t>(info->tls_dir);
++    img->tls.raw_end = mem.read<uint32_t>(info->tls_dir + 4);
++    img->tls.index_va = mem.read<uint32_t>(info->tls_dir + 8);
++    img->tls.callbacks = mem.read<uint32_t>(info->tls_dir + 12);
++    img->tls.zero_fill = mem.read<uint32_t>(info->tls_dir + 16);
++  }
++  return true;
++}
++
++}  // namespace recomp
+diff --git a/src/runtime/xbe_image.h b/src/runtime/xbe_image.h
+new file mode 100644
+index 0000000..c80c034
+--- /dev/null
++++ b/src/runtime/xbe_image.h
+@@ -0,0 +1,44 @@
++#pragma once
++// Maps an original Xbox executable (XBE) into the guest address space and
++// describes it as a PeImage, so the lifter and runtimes that know PE images
++// can take it unchanged.
++//
++// - The image header and every section are mapped at their VAs (XBEs are
++//   never relocated).
++// - Entry point and kernel thunk table address are stored XOR-ed with a
++//   retail or a debug key; the key whose entry lands inside a section wins.
++// - The kernel thunk table holds one slot per xboxkrnl.exe import, as
++//   0x80000000 | ordinal, up to a zero slot. Each becomes a PeImport of
++//   dll "xboxkrnl.exe", name "#<ordinal>", with iat_va the slot. Slots are
++//   left as in the file: the runtime binds them.
++// - Code sections: executable sections laid out back to back from .text
++//   (the XDK libraries' own sections follow it). `code_hi` is the end of the
++//   last of them. XBE linkers flag data sections executable too, so the run
++//   stops at the section holding the kernel thunk table (start of read-only
++//   data) and at .rdata/.data/.bss; executable sections elsewhere (DSP code)
++//   are not x86 either.
++
++#include <string>
++
++#include "runtime/pe_image.h"
++
++namespace recomp {
++
++struct XbeInfo {
++  gaddr headers_size = 0;
++  gaddr cert = 0;          // certificate VA
++  gaddr tls_dir = 0;       // TLS directory VA, 0 if none
++  gaddr kernel_thunk = 0;  // decoded thunk table VA
++  uint32_t stack_commit = 0, heap_reserve = 0, heap_commit = 0;
++  gaddr code_lo = 0, code_hi = 0;
++  bool debug_key = false;
++};
++
++// True if the file starts with the XBE magic ("XBEH").
++bool IsXbeFile(const std::string& path);
++
++// Fills img (sections, entry, imports, TLS) and maps the image into mem.
++bool LoadXbe(const std::string& path, GuestMemory& mem, PeImage* img,
++             XbeInfo* info, std::string* err);
++
++}  // namespace recomp
+diff --git a/tools/lifter/emit.cpp b/tools/lifter/emit.cpp
+index 39f5e66..f67c2de 100644
+--- a/tools/lifter/emit.cpp
++++ b/tools/lifter/emit.cpp
+@@ -218,6 +218,23 @@ bool IsFcmov(ZydisMnemonic m) {
+   }
+ }
+ 
++// MMX: an MMX register operand, EMMS, or a conversion between MMX and SSE
++// registers (their memory forms included).
++bool IsMmx(const ZydisDecodedInstruction& d, const ZydisDecodedOperand* ops) {
++  switch (d.mnemonic) {
++    case ZYDIS_MNEMONIC_EMMS: case ZYDIS_MNEMONIC_CVTPI2PS:
++    case ZYDIS_MNEMONIC_CVTPS2PI: case ZYDIS_MNEMONIC_CVTTPS2PI:
++      return true;
++    default:
++      break;
++  }
++  for (int i = 0; i < d.operand_count_visible; i++)
++    if (ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
++        ZydisRegisterGetClass(ops[i].reg.value) == ZYDIS_REGCLASS_MMX)
++      return true;
++  return false;
++}
++
+ // Zydis files FCMOVcc under ZYDIS_CATEGORY_CMOV with the integer CMOVcc.
+ bool IsX87(const ZydisDecodedInstruction& d) {
+   return d.meta.category == ZYDIS_CATEGORY_X87_ALU || d.mnemonic == ZYDIS_MNEMONIC_FWAIT ||
+@@ -571,7 +588,7 @@ class InsnEmitter {
+   // ---- control flow -------------------------------------------------------
+   std::string TailCall(uint64_t t) {
+     refs_.insert(t);
+-    return Fmt("{ LIFT_SPILL; %sreturn %s(c); }", TailAttr(), FnName(t).c_str());
++    return Fmt("{ LIFT_SPILL; %sreturn %s(c); }", TailAttr(), CallName(p_, t).c_str());
+   }
+   std::string GotoOrTail(uint64_t t) {
+     if (IsOtherEntry(p_, f_, t)) return TailCall(t);
+@@ -614,6 +631,7 @@ class InsnEmitter {
+   void EmitString64(int n, StringKind kind);
+   void EmitX87();
+   void EmitSse();
++  void EmitMmx();
+   void EmitAvx();
+   // ---- AVX: VEX operands by 128-bit half (h = 0: c.xmm, 1: c.ymm_hi) ----
+   static int VecIndex(ZydisRegister r) {
+@@ -1560,6 +1578,7 @@ void InsnEmitter::EmitSse() {
+     }
+     case ZYDIS_MNEMONIC_MOVAPS: case ZYDIS_MNEMONIC_MOVAPD: case ZYDIS_MNEMONIC_MOVUPS:
+     case ZYDIS_MNEMONIC_MOVUPD: case ZYDIS_MNEMONIC_MOVDQA: case ZYDIS_MNEMONIC_MOVDQU:
++    case ZYDIS_MNEMONIC_MOVNTPS:  // non-temporal store: a plain aligned store
+       if (IsXmm(0)) {
+         std::string s = src(1);
+         L(XmmRef(0) + " = " + s + ";");
+@@ -1965,6 +1984,8 @@ void InsnEmitter::EmitSse() {
+     case ZYDIS_MNEMONIC_PREFETCHNTA: case ZYDIS_MNEMONIC_PREFETCHT0:
+     case ZYDIS_MNEMONIC_PREFETCHT1: case ZYDIS_MNEMONIC_PREFETCHT2:
+       return;  // a hint
++    case ZYDIS_MNEMONIC_SFENCE:  // stores are ordered for one guest thread
++      return;
+     default:
+       return Unimpl();
+   }
+@@ -2230,7 +2251,7 @@ void InsnEmitter::Emit64() {
+           return;
+         }
+         refs_.insert(t);
+-        L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", FnName(t).c_str()));
++        L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", CallName(p_, t).c_str()));
+       } else {
+         if (!PrepareMem()) return Unimpl();
+         L("const uint64_t t = " + Read(0) + ";");
+@@ -2557,6 +2578,186 @@ void InsnEmitter::Emit64() {
+   Unimpl();
+ }
+ 
++// MMX (runtime/mmx.h): registers are the x87 significands; every MMX
++// instruction but EMMS enters MMX state first.
++void InsnEmitter::EmitMmx() {
++  const auto m = d_.mnemonic;
++  if (X64() || !PrepareMem()) return Unimpl();
++  const std::string va = Hex(in_.va);
++  auto mm = [&](int i) -> int {
++    if (!IsReg(i)) return -1;
++    ZydisRegister r = Op(i).reg.value;
++    return r >= ZYDIS_REGISTER_MM0 && r <= ZYDIS_REGISTER_MM7 ? r - ZYDIS_REGISTER_MM0 : -1;
++  };
++  bool any_mm = false;
++  for (int i = 0; i < Nvis(); i++) any_mm |= mm(i) >= 0;
++  if (m == ZYDIS_MNEMONIC_EMMS) {
++    L("::recomp::mmx::Emms(c);");
++    return;
++  }
++  if (any_mm) L("::recomp::mmx::Enter(c);");
++  // Operand i as a uint64_t: MMX register, memory (8 or 4 bytes), GPR.
++  auto src = [&](int i) -> std::string {
++    if (mm(i) >= 0) return Fmt("::recomp::mmx::Get(c, %d)", mm(i));
++    if (IsMem(i))
++      return Bytes(i) == 8 ? Fmt("::recomp::lift::Rd<uint64_t>(B, m%d)", i)
++                           : Fmt("uint64_t(%s)", Read(i).c_str());
++    if (IsReg(i)) return Fmt("uint64_t(%s)", Read(i).c_str());
++    return Fmt("uint64_t(%s)", Hex(uint32_t(Op(i).imm.value.u)).c_str());
++  };
++  auto dst = [&](int i, const std::string& v) -> std::string {
++    if (mm(i) >= 0) return Fmt("::recomp::mmx::Set(c, %d, %s);", mm(i), v.c_str());
++    if (IsMem(i) && Bytes(i) == 8)
++      return Fmt("::recomp::lift::Wr<uint64_t>(B, m%d, %s);", i, v.c_str());
++    return Write(i, Fmt("uint32_t(%s)", v.c_str()));
++  };
++  // dst = f(dst, src) with a helper name and its template argument.
++  auto bin = [&](const char* fn) {
++    if (mm(0) < 0) return Unimpl();
++    std::string b = src(1);
++    L(Fmt("{ const uint64_t a = ::recomp::mmx::Get(c, %d), b = %s;", mm(0), b.c_str()));
++    L("  " + dst(0, Fmt("::recomp::mmx::%s(a, b)", fn)) + " }");
++  };
++  auto shift = [&](const char* fn) {
++    if (mm(0) < 0) return Unimpl();
++    std::string n = IsImm(1) ? Fmt("uint64_t(%u)", uint32_t(Op(1).imm.value.u & 0xFF)) : src(1);
++    L(dst(0, Fmt("::recomp::mmx::%s(::recomp::mmx::Get(c, %d), %s)", fn, mm(0), n.c_str())));
++  };
++  switch (m) {
++    case ZYDIS_MNEMONIC_MOVQ: case ZYDIS_MNEMONIC_MOVNTQ:
++      if (mm(0) < 0 && mm(1) < 0) return Unimpl();
++      if (IsXmm(0) || IsXmm(1)) return Unimpl();  // MOVQ2DQ-like forms
++      L(dst(0, src(1)));
++      return;
++    case ZYDIS_MNEMONIC_MOVD:
++      if (IsXmm(0) || IsXmm(1)) return Unimpl();
++      if (mm(0) >= 0) L(dst(0, Fmt("uint64_t(uint32_t(%s))", src(1).c_str())));
++      else L(Write(0, Fmt("uint32_t(%s)", src(1).c_str())));
++      return;
++    case ZYDIS_MNEMONIC_PADDB: return bin("Add<uint8_t>");
++    case ZYDIS_MNEMONIC_PADDW: return bin("Add<uint16_t>");
++    case ZYDIS_MNEMONIC_PADDD: return bin("Add<uint32_t>");
++    case ZYDIS_MNEMONIC_PADDQ: return bin("Add<uint64_t>");
++    case ZYDIS_MNEMONIC_PADDSB: return bin("AddSat<int8_t>");
++    case ZYDIS_MNEMONIC_PADDSW: return bin("AddSat<int16_t>");
++    case ZYDIS_MNEMONIC_PADDUSB: return bin("AddSat<uint8_t>");
++    case ZYDIS_MNEMONIC_PADDUSW: return bin("AddSat<uint16_t>");
++    case ZYDIS_MNEMONIC_PSUBB: return bin("Sub<uint8_t>");
++    case ZYDIS_MNEMONIC_PSUBW: return bin("Sub<uint16_t>");
++    case ZYDIS_MNEMONIC_PSUBD: return bin("Sub<uint32_t>");
++    case ZYDIS_MNEMONIC_PSUBQ: return bin("Sub<uint64_t>");
++    case ZYDIS_MNEMONIC_PSUBSB: return bin("SubSat<int8_t>");
++    case ZYDIS_MNEMONIC_PSUBSW: return bin("SubSat<int16_t>");
++    case ZYDIS_MNEMONIC_PSUBUSB: return bin("SubSat<uint8_t>");
++    case ZYDIS_MNEMONIC_PSUBUSW: return bin("SubSat<uint16_t>");
++    case ZYDIS_MNEMONIC_PMULLW: return bin("MulLo16");
++    case ZYDIS_MNEMONIC_PMULHW: return bin("MulHi16");
++    case ZYDIS_MNEMONIC_PMULHUW: return bin("MulHiU16");
++    case ZYDIS_MNEMONIC_PMADDWD: return bin("MAddWD");
++    case ZYDIS_MNEMONIC_PSADBW: return bin("SadBW");
++    case ZYDIS_MNEMONIC_PAVGB: return bin("Avg<uint8_t>");
++    case ZYDIS_MNEMONIC_PAVGW: return bin("Avg<uint16_t>");
++    case ZYDIS_MNEMONIC_PMINUB: return bin("Min<uint8_t>");
++    case ZYDIS_MNEMONIC_PMAXUB: return bin("Max<uint8_t>");
++    case ZYDIS_MNEMONIC_PMINSW: return bin("Min<int16_t>");
++    case ZYDIS_MNEMONIC_PMAXSW: return bin("Max<int16_t>");
++    case ZYDIS_MNEMONIC_PCMPEQB: return bin("CmpEq<uint8_t>");
++    case ZYDIS_MNEMONIC_PCMPEQW: return bin("CmpEq<uint16_t>");
++    case ZYDIS_MNEMONIC_PCMPEQD: return bin("CmpEq<uint32_t>");
++    case ZYDIS_MNEMONIC_PCMPGTB: return bin("CmpGt<int8_t>");
++    case ZYDIS_MNEMONIC_PCMPGTW: return bin("CmpGt<int16_t>");
++    case ZYDIS_MNEMONIC_PCMPGTD: return bin("CmpGt<int32_t>");
++    default:
++      break;
++  }
++  switch (m) {
++    case ZYDIS_MNEMONIC_PAND: case ZYDIS_MNEMONIC_PANDN: case ZYDIS_MNEMONIC_POR:
++    case ZYDIS_MNEMONIC_PXOR: {
++      if (mm(0) < 0) return Unimpl();
++      const char* op = m == ZYDIS_MNEMONIC_PAND ? "a & b" : m == ZYDIS_MNEMONIC_PANDN ? "~a & b"
++                       : m == ZYDIS_MNEMONIC_POR ? "a | b" : "a ^ b";
++      std::string b = src(1);
++      L(Fmt("{ const uint64_t a = ::recomp::mmx::Get(c, %d), b = %s;", mm(0), b.c_str()));
++      L("  " + dst(0, op) + " }");
++      return;
++    }
++    case ZYDIS_MNEMONIC_PUNPCKLBW: case ZYDIS_MNEMONIC_PUNPCKLWD: case ZYDIS_MNEMONIC_PUNPCKLDQ:
++    case ZYDIS_MNEMONIC_PUNPCKHBW: case ZYDIS_MNEMONIC_PUNPCKHWD: case ZYDIS_MNEMONIC_PUNPCKHDQ: {
++      if (mm(0) < 0) return Unimpl();
++      const bool high = m == ZYDIS_MNEMONIC_PUNPCKHBW || m == ZYDIS_MNEMONIC_PUNPCKHWD ||
++                        m == ZYDIS_MNEMONIC_PUNPCKHDQ;
++      const char* t = (m == ZYDIS_MNEMONIC_PUNPCKLBW || m == ZYDIS_MNEMONIC_PUNPCKHBW) ? "uint8_t"
++                      : (m == ZYDIS_MNEMONIC_PUNPCKLWD || m == ZYDIS_MNEMONIC_PUNPCKHWD) ? "uint16_t"
++                                                                                       : "uint32_t";
++      std::string b = src(1);  // the low forms read only 32 bits of memory
++      L(Fmt("{ const uint64_t a = ::recomp::mmx::Get(c, %d), b = %s;", mm(0), b.c_str()));
++      L("  " + dst(0, Fmt("::recomp::mmx::Unpack<%s>(a, b, %s)", t, high ? "true" : "false")) + " }");
++      return;
++    }
++    case ZYDIS_MNEMONIC_PACKSSWB: return bin("Pack<int16_t, int8_t>");
++    case ZYDIS_MNEMONIC_PACKSSDW: return bin("Pack<int32_t, int16_t>");
++    case ZYDIS_MNEMONIC_PACKUSWB: return bin("Pack<int16_t, uint8_t>");
++    case ZYDIS_MNEMONIC_PSLLW: return shift("Shl<uint16_t>");
++    case ZYDIS_MNEMONIC_PSLLD: return shift("Shl<uint32_t>");
++    case ZYDIS_MNEMONIC_PSLLQ: return shift("Shl<uint64_t>");
++    case ZYDIS_MNEMONIC_PSRLW: return shift("Shr<uint16_t>");
++    case ZYDIS_MNEMONIC_PSRLD: return shift("Shr<uint32_t>");
++    case ZYDIS_MNEMONIC_PSRLQ: return shift("Shr<uint64_t>");
++    case ZYDIS_MNEMONIC_PSRAW: return shift("Sar<int16_t>");
++    case ZYDIS_MNEMONIC_PSRAD: return shift("Sar<int32_t>");
++    case ZYDIS_MNEMONIC_PSHUFW:
++      if (mm(0) < 0) return Unimpl();
++      L(dst(0, Fmt("::recomp::mmx::ShufW(%s, %uu)", src(1).c_str(),
++                   uint32_t(Op(2).imm.value.u & 0xFF))));
++      return;
++    case ZYDIS_MNEMONIC_PEXTRW:
++      if (mm(1) < 0 || !IsReg(0)) return Unimpl();
++      L(Write(0, Fmt("uint32_t(::recomp::mmx::Lane<uint16_t>(::recomp::mmx::Get(c, %d), %u))",
++                     mm(1), uint32_t(Op(2).imm.value.u & 3))));
++      return;
++    case ZYDIS_MNEMONIC_PINSRW:
++      if (mm(0) < 0) return Unimpl();
++      L(dst(0, Fmt("::recomp::mmx::SetLane<uint16_t>(::recomp::mmx::Get(c, %d), %u, "
++                   "uint16_t(%s))",
++                   mm(0), uint32_t(Op(2).imm.value.u & 3), src(1).c_str())));
++      return;
++    case ZYDIS_MNEMONIC_PMOVMSKB:
++      if (mm(1) < 0 || !IsReg(0)) return Unimpl();
++      L(Write(0, Fmt("::recomp::mmx::MovMskB(::recomp::mmx::Get(c, %d))", mm(1))));
++      return;
++    case ZYDIS_MNEMONIC_CVTPI2PS: {
++      // Two int32 lanes to the two low float lanes, each rounded by MXCSR.
++      if (!IsXmm(0)) return Unimpl();
++      std::string v = src(1);
++      L(Fmt("{ const uint64_t v = %s; ::recomp::Xmm t{};", v.c_str()));
++      for (int i = 0; i < 2; i++) {
++        L(Fmt("  ::recomp::sse::CvtIntToF(c, false, false, uint64_t(int64_t(int32_t(v >> %d))), "
++              "t, %s);", 32 * i, va.c_str()));
++        L(Fmt("  ::recomp::sse::SetLane<uint32_t>(%s, %d, ::recomp::sse::Lane<uint32_t>(t, 0));",
++              XmmRef(0).c_str(), i));
++      }
++      L("}");
++      return;
++    }
++    case ZYDIS_MNEMONIC_CVTPS2PI: case ZYDIS_MNEMONIC_CVTTPS2PI: {
++      if (mm(0) < 0) return Unimpl();
++      const bool trunc = m == ZYDIS_MNEMONIC_CVTTPS2PI;
++      std::string s = IsXmm(1) ? XmmRef(1) : Fmt("::recomp::sse::Ld(B, m1, 8)");
++      L(Fmt("{ const ::recomp::Xmm s = %s; ::recomp::Xmm l{}; uint64_t r = 0;", s.c_str()));
++      for (int i = 0; i < 2; i++) {
++        L(Fmt("  ::recomp::sse::SetLane<uint32_t>(l, 0, ::recomp::sse::Lane<uint32_t>(s, %d));",
++              i));
++        L(Fmt("  r |= uint64_t(::recomp::sse::CvtToI32(c, false, l, %s, %s)) << %d;",
++              trunc ? "true" : "false", va.c_str(), 32 * i));
++      }
++      L(Fmt("  ::recomp::mmx::Set(c, %d, r); }", mm(0)));
++      return;
++    }
++    default:
++      return Unimpl();
++  }
++}
++
+ void InsnEmitter::Emit() {
+   const auto m = d_.mnemonic;
+   const uint64_t next = in_.next();
+@@ -2566,6 +2767,7 @@ void InsnEmitter::Emit() {
+     return EmitX87();
+   }
+   if (d_.meta.isa_set == ZYDIS_ISA_SET_AVX) return EmitAvx();
++  if (IsMmx(d_, in_.ops)) return EmitMmx();
+   if (IsSse(d_)) return EmitSse();
+   if (d_.meta.category == ZYDIS_CATEGORY_STRINGOP) return EmitString();
+ 
+@@ -2605,7 +2807,7 @@ void InsnEmitter::Emit() {
+           return;
+         }
+         refs_.insert(t);
+-        L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", FnName(t).c_str()));
++        L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", CallName(p_, t).c_str()));
+       } else {
+         if (!PrepareMem()) return Unimpl();
+         L("const uint32_t t = " + Read(0) + ";");
+@@ -2695,6 +2897,14 @@ void InsnEmitter::Emit() {
+   switch (m) {
+     case ZYDIS_MNEMONIC_NOP:
+     case ZYDIS_MNEMONIC_PAUSE:
++    case ZYDIS_MNEMONIC_PREFETCH:
++      return;
++    // Guests that run in ring 0 (console executables) mask interrupts around
++    // short critical sections and flush caches before DMA. Lifted code has
++    // no interrupts and no incoherent caches: nothing to do.
++    case ZYDIS_MNEMONIC_CLI:
++    case ZYDIS_MNEMONIC_STI:
++    case ZYDIS_MNEMONIC_WBINVD:
+       return;
+     case ZYDIS_MNEMONIC_MOV:
+       L(Write(0, Read(1, Bytes(0))));
+@@ -2938,6 +3148,9 @@ void InsnEmitter::Emit() {
+ }  // namespace
+ 
+ std::string FnName(uint64_t va) { return Fmt("f_%08llX", U(va)); }
++std::string CallName(const Program& p, uint64_t va) {
++  return Fmt(p.overridable ? "fp_%08llX" : "f_%08llX", U(va));
++}
+ 
+ void Emitter::EmitFunction(const Function& f, std::string* out,
+                            std::set<uint64_t>* refs, EmitStats* stats) {
+@@ -2958,6 +3171,12 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
+   auto eh = p_.x64 ? p_.eh_frames.find(f.entry) : p_.eh_frames.end();
+   if (eh != p_.eh_frames.end()) resumable = true;
+   for (const auto& [va, in] : f.insns) {
++    // A direct call to an SEH prolog helper registers this function's frame
++    // (the helper writes fs:[0] on its behalf).
++    if (in.ok && in.d.mnemonic == ZYDIS_MNEMONIC_CALL &&
++        in.ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
++        p_.seh_prologs.count(RelTarget(in)))
++      resumable = true;
+     if (!in.ok || in.d.mnemonic != ZYDIS_MNEMONIC_MOV) continue;
+     const auto& o0 = in.ops[0];
+     if (o0.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+@@ -3030,7 +3249,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
+       if (IsOtherEntry(p_, f, nx)) {
+         refs->insert(nx);
+         o += Fmt("  { LIFT_SPILL; %sreturn %s(c); }\n", TailAttr(),
+-                 FnName(nx).c_str());
++                 CallName(p_, nx).c_str());
+       } else if (ni == f.insns.end() || ni->first != nx) {
+         o += f.insns.count(nx)
+                  ? Fmt("  goto L_%08llX;\n", U(nx))
+@@ -3060,6 +3279,8 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
+ // Non-x87 instructions that may sit inside an x87 run: anything straight-
+ // line that does not call out (the run's state is only in locals).
+ static bool RunNeutral(const Insn& in) {
++  // MMX lives in the x87 registers, which a run keeps in locals.
++  if (IsMmx(in.d, in.ops)) return false;
+   switch (in.d.meta.category) {
+     case ZYDIS_CATEGORY_CALL: case ZYDIS_CATEGORY_RET:
+     case ZYDIS_CATEGORY_COND_BR: case ZYDIS_CATEGORY_UNCOND_BR:
+diff --git a/tools/lifter/emit.h b/tools/lifter/emit.h
+index 9504820..b0eca08 100644
+--- a/tools/lifter/emit.h
++++ b/tools/lifter/emit.h
+@@ -18,6 +18,9 @@ struct EmitStats {
+ };
+ 
+ std::string FnName(uint64_t va);
++// What a direct call or tail call to va names: f_<VA>, or its slot
++// fp_<VA> with --overridable.
++std::string CallName(const Program& p, uint64_t va);
+ 
+ class Emitter {
+  public:
+diff --git a/tools/lifter/function.cpp b/tools/lifter/function.cpp
+index de4c443..ead4cfe 100644
+--- a/tools/lifter/function.cpp
++++ b/tools/lifter/function.cpp
+@@ -21,6 +21,16 @@ bool Decoder::Decode(const Program& p, uint64_t va, Insn* out) const {
+   out->ok = false;
+   if (!p.InText(va)) return false;
+   size_t n = p.BytesLeft(va);
++  // Eight zero bytes are four `add [eax], al` in a row: never code, but the
++  // zero-filled tables some code sections carry. Treat them as undecodable,
++  // so a stray entry into such a table ends there instead of lifting all of
++  // it.
++  if (n >= 8) {
++    const uint8_t* b = p.Bytes(va);
++    bool zero = true;
++    for (int i = 0; i < 8; i++) zero &= b[i] == 0;
++    if (zero) return false;
++  }
+   if (n > ZYDIS_MAX_INSTRUCTION_LENGTH) n = ZYDIS_MAX_INSTRUCTION_LENGTH;
+   out->ok = ZYAN_SUCCESS(
+       ZydisDecoderDecodeFull(&dec_, p.Bytes(va), n, &out->d, out->ops));
+@@ -350,10 +360,35 @@ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
+       continue;
+     }
+     if (in->d.mnemonic != ZYDIS_MNEMONIC_CMP ||
+-        o0.type != ZYDIS_OPERAND_TYPE_REGISTER || Full(o0.reg.value) != Full(r) ||
+-        o1.type != ZYDIS_OPERAND_TYPE_IMMEDIATE || o1.imm.value.u >= 4096)
++        o0.type != ZYDIS_OPERAND_TYPE_REGISTER || Full(o0.reg.value) != Full(r))
++      return false;
++    uint64_t bound;
++    if (o1.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
++      bound = o1.imm.value.u;
++    } else if (o1.type == ZYDIS_OPERAND_TYPE_REGISTER) {
++      // `mov reg2, imm` ... `cmp index, reg2`: the bound sits in a register
++      // (compilers do this when the constant is reused). Find the mov in the
++      // straight-line code before the cmp, with no other write to reg2.
++      const ZydisRegister r2 = o1.reg.value;
++      const Insn* m2 = in;
++      bool found = false;
++      for (int k = 0; k < 16 && !found; k++) {
++        m2 = Before(f, m2->va);
++        if (!m2 || m2->d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) return false;
++        if (!WritesReg(*m2, r2)) continue;
++        if (m2->d.mnemonic != ZYDIS_MNEMONIC_MOV ||
++            m2->ops[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
++            m2->ops[0].reg.value != r2 || m2->ops[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
++          return false;
++        bound = m2->ops[1].imm.value.u;
++        found = true;
++      }
++      if (!found) return false;
++    } else {
+       return false;
+-    uint32_t cases = static_cast<uint32_t>(o1.imm.value.u) + 1;
++    }
++    if (bound >= 4096) return false;
++    uint32_t cases = static_cast<uint32_t>(bound) + 1;
+     if (two_level) {
+       // A byte index table picks the entry.
+       if (!in_text(index, cases)) return false;
+@@ -376,6 +411,35 @@ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
+   return false;
+ }
+ 
++bool ExtendJumpTable(const Program& p, const Function& f, const Insn& jmp,
++                     std::vector<uint64_t>* targets) {
++  // A table from symbols (or recovered with a bound that was not the real
++  // one) can be short: e.g. when the bound is a register set on several
++  // paths. Compilers lay the table out after the function's code, so the
++  // entries run on while they point into [entry, table); padding, the next
++  // table or code after it stop the scan.
++  if (p.x64 || !jmp.ok || jmp.d.mnemonic != ZYDIS_MNEMONIC_JMP) return false;
++  const auto& m = jmp.ops[0];
++  if (m.type != ZYDIS_OPERAND_TYPE_MEMORY || m.mem.base != ZYDIS_REGISTER_NONE ||
++      m.mem.index == ZYDIS_REGISTER_NONE || m.mem.scale != 4)
++    return false;
++  const uint32_t table = static_cast<uint32_t>(m.mem.disp.value);
++  const Module* mod = p.TextOf(jmp.va);
++  if (table <= f.entry || p.TextOf(table) != mod) return false;
++  bool added = false;
++  for (uint32_t i = 0; i < 4096; i++) {
++    const uint32_t a = table + 4 * i;
++    if (p.TextOf(a) != mod || p.TextOf(a + 3) != mod) break;
++    const uint64_t t = p.mem.read<uint32_t>(a);
++    if (t < f.entry || t >= table || p.TextOf(t) != mod) break;
++    if (std::find(targets->begin(), targets->end(), t) == targets->end()) {
++      targets->push_back(t);
++      added = true;
++    }
++  }
++  return added;
++}
++
+ void BuildFunction(const Program& p, const Decoder& dec, uint64_t entry,
+                    Function* out) {
+   Function& f = *out;
+diff --git a/tools/lifter/function.h b/tools/lifter/function.h
+index 10a4b16..36d022e 100644
+--- a/tools/lifter/function.h
++++ b/tools/lifter/function.h
+@@ -74,6 +74,10 @@ void BuildFunction(const Program& p, const Decoder& dec, uint64_t entry,
+ // False if `jmp` is not one of them or a target leaves its module's .text.
+ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
+                       std::vector<uint64_t>* targets);
++// Adds entries a known table (symbols or recovered) left out: dwords after
++// the known ones that point into [function entry, table). True if any.
++bool ExtendJumpTable(const Program& p, const Function& f, const Insn& jmp,
++                     std::vector<uint64_t>* targets);
+ 
+ // A direct branch target that is another (strong) function entry: reached
+ // by a tail call, not lifted into f. See Program::weak.
+diff --git a/tools/lifter/main.cpp b/tools/lifter/main.cpp
+index 48432c5..e586de3 100644
+--- a/tools/lifter/main.cpp
++++ b/tools/lifter/main.cpp
+@@ -8,6 +8,8 @@
+ //            [--module <game.dll> --symbols DIR [--manifest FILE]
+ //             [--base HEX]]...
+ //            [--only VA[,VA...]]   (just these functions and their callees)
++//            [--overridable]   (calls go through per-function slots)
++//            [--lines-per-file N]  (also start a new file after N lines)
+ //
+ // Each --module adds a DLL the game loads itself, lifted into the same
+ // output; --symbols/--manifest/--base after it apply to that DLL. DLLs
+@@ -27,6 +29,7 @@
+ // consistently. Then the functions are emitted into generated/gen_NNN.cpp
+ // plus a table file.
+ 
++#include <algorithm>
+ #include <cctype>
+ #include <cstdio>
+ #include <deque>
+@@ -94,9 +97,11 @@ int main(int argc, char** argv) {
+   std::vector<ModuleArgs> mods{{"", "symbols", "lifter.manifest", 0}};
+   std::string outdir = "generated";
+   uint64_t per_file = 12000;
++  uint64_t lines_per_file = 0;  // 0: split by instruction count only
+   uint64_t dump = 0;
+   std::string x87_test, int_test, sse_test;
+   std::set<uint64_t> only;
++  bool overridable = false;
+   for (int i = 1; i < argc; i++) {
+     std::string a = argv[i];
+     auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+@@ -106,7 +111,9 @@ int main(int argc, char** argv) {
+     else if (a == "--manifest") mods.back().manifest = val();
+     else if (a == "--base") mods.back().base = std::stoull(val(), nullptr, 16);
+     else if (a == "--out") outdir = val();
++    else if (a == "--overridable") overridable = true;
+     else if (a == "--insns-per-file") per_file = std::stoull(val());
++    else if (a == "--lines-per-file") lines_per_file = std::stoull(val());
+     else if (a == "--dump") dump = std::stoull(val(), nullptr, 16);
+     else if (a == "--x87-test") x87_test = val();
+     else if (a == "--int-test") int_test = val();
+@@ -148,6 +155,7 @@ int main(int argc, char** argv) {
+       return 1;
+     }
+   }
++  p.overridable = overridable;
+   lifter::Decoder dec(p.x64);
+   // Files lifted from x64 images see lifted.h's x64 register model.
+   std::string prologue = kFilePrologue;
+@@ -203,9 +211,16 @@ int main(int argc, char** argv) {
+   size_t initial = p.entries.size();
+   std::deque<uint64_t> work(p.entries.begin(), p.entries.end());
+   std::set<uint64_t> done;
+-  size_t from_code_ptrs = 0, from_data_ptrs = 0;
++  size_t from_code_ptrs = 0, from_data_ptrs = 0, zero_starts = 0;
+   auto candidate = [&](const lifter::Module* m, uint64_t t, size_t* counter) {
+     if (p.TextOf(t) != m || p.entries.count(t)) return;
++    // Zero bytes decode as `add [eax], al`: a pointer-looking value into a
++    // zero-filled table inside a code section, never a function. Taken as an
++    // entry, it lifts the whole zero run once per such value.
++    if (p.BytesLeft(t) >= 2 && p.Bytes(t)[0] == 0 && p.Bytes(t)[1] == 0) {
++      zero_starts++;
++      return;
++    }
+     lifter::Insn in;
+     if (!dec.Decode(p, t, &in)) return;
+     p.entries.insert(t);
+@@ -224,7 +239,7 @@ int main(int argc, char** argv) {
+         for (uint64_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
+           candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
+     }
+-  size_t recovered_tables = 0;
++  size_t recovered_tables = 0, extended_tables = 0;
+   while (!work.empty()) {
+     uint64_t e = work.front();
+     work.pop_front();
+@@ -236,10 +251,17 @@ int main(int argc, char** argv) {
+     for (bool more = true; more;) {
+       more = false;
+       for (const auto& [va, in] : f.insns) {
+-        std::vector<uint64_t> targets;
+-        if (p.jumptables.count(va) ||
+-            !lifter::RecoverJumpTable(p, f, in, &targets))
++        auto known = p.jumptables.find(va);
++        if (known != p.jumptables.end()) {
++          // Entries the symbols' (or the recovered) table left out.
++          if (lifter::ExtendJumpTable(p, f, in, &known->second)) {
++            extended_tables++;
++            more = true;
++          }
+           continue;
++        }
++        std::vector<uint64_t> targets;
++        if (!lifter::RecoverJumpTable(p, f, in, &targets)) continue;
+         p.jumptables[va] = std::move(targets);
+         recovered_tables++;
+         more = true;
+@@ -275,8 +297,9 @@ int main(int argc, char** argv) {
+               "%zu via code pointers, %zu via data pointers; %zu weak)\n",
+               p.entries.size(), initial, p.entries.size() - initial,
+               from_code_ptrs, from_data_ptrs, p.weak.size());
+-  std::printf("jump tables: %zu from Ghidra, %zu recovered\n",
+-              p.jumptables.size() - recovered_tables, recovered_tables);
++  std::printf("pointer candidates rejected (start in zero bytes): %zu\n", zero_starts);
++  std::printf("jump tables: %zu from Ghidra, %zu recovered, %zu extended\n",
++              p.jumptables.size() - recovered_tables, recovered_tables, extended_tables);
+ 
+   // Pass 2: final CFGs and emission.
+   std::filesystem::create_directories(outdir);
+@@ -285,7 +308,7 @@ int main(int argc, char** argv) {
+   std::map<std::string, std::string> files;
+   std::string body, report_warnings;
+   std::set<uint64_t> refs;
+-  uint64_t file_insns = 0;
++  uint64_t file_insns = 0, file_lines = 0;
+   int file_no = 0;
+   // Output file names and per-module totals.
+   const lifter::Module* cur = &p.modules[0];
+@@ -299,8 +322,11 @@ int main(int argc, char** argv) {
+     std::string text = prologue;
+     // Declare every referenced function, including ones defined later in
+     // this file.
+-    for (uint64_t r : refs)
++    for (uint64_t r : refs) {
+       text += "void " + lifter::FnName(r) + "(::recomp::Ctx& c);\n";
++      if (p.overridable)
++        text += "extern ::recomp::GuestFn " + lifter::CallName(p, r) + ";\n";
++    }
+     text += "\n" + body + "}  // namespace recomp::gen\n";
+     Shorten(text);
+     char num[16];
+@@ -309,6 +335,7 @@ int main(int argc, char** argv) {
+     body.clear();
+     refs.clear();
+     file_insns = 0;
++    file_lines = 0;
+   };
+ 
+   for (uint64_t e : p.entries) {
+@@ -330,11 +357,22 @@ int main(int argc, char** argv) {
+       report_warnings += buf + w + "\n";
+     }
+     uint64_t before = stats.insns;
+-    em.EmitFunction(f, &body, &refs, &stats);
++    std::string code;
++    std::set<uint64_t> code_refs;
++    em.EmitFunction(f, &code, &code_refs, &stats);
++    const uint64_t code_lines = uint64_t(std::count(code.begin(), code.end(), '\n'));
++    // x87 and SSE code expands to many more lines per instruction than
++    // integer code: a line budget bounds a file's compile time and memory.
++    // A function that would cross it starts a new file (one longer than the
++    // budget gets a file of its own).
++    if (lines_per_file && !body.empty() && file_lines + code_lines > lines_per_file) flush();
++    body += code;
++    refs.insert(code_refs.begin(), code_refs.end());
++    file_lines += code_lines;
+     file_insns += stats.insns - before;
+     per_module[cur].functions++;
+     per_module[cur].insns += stats.insns - before;
+-    if (file_insns >= per_file) flush();
++    if (file_insns >= per_file || (lines_per_file && file_lines >= lines_per_file)) flush();
+   }
+   flush();
+ 
+@@ -354,6 +392,18 @@ int main(int argc, char** argv) {
+   }
+   table += "};\nextern const uint32_t kLiftedFunctionCount = " +
+            std::to_string(p.entries.size()) + ";\n}  // namespace recomp\n";
++  if (p.overridable) {
++    // The call slots, initialised to the lifted bodies, in table order.
++    table += "namespace recomp::gen {\n";
++    for (uint64_t e : p.entries)
++      table += "::recomp::GuestFn " + lifter::CallName(p, e) + " = &" +
++               lifter::FnName(e) + ";\n";
++    table += "}  // namespace recomp::gen\nnamespace recomp {\n"
++             "extern GuestFn* const kLiftedSlots[] = {\n";
++    for (uint64_t e : p.entries)
++      table += "  &gen::" + lifter::CallName(p, e) + ",\n";
++    table += "};\n}  // namespace recomp\n";
++  }
+   files["table.cpp"] = table;
+ 
+   // Remove stale generated files from earlier runs with more files.
+diff --git a/tools/lifter/program.cpp b/tools/lifter/program.cpp
+index 7e220b1..6291e80 100644
+--- a/tools/lifter/program.cpp
++++ b/tools/lifter/program.cpp
+@@ -1,6 +1,7 @@
+ #include "program.h"
+ 
+ #include "runtime/unwind.h"
++#include "runtime/xbe_image.h"
+ 
+ #include <filesystem>
+ #include <fstream>
+@@ -42,7 +43,8 @@ bool ReadTsv(const std::string& path, Fn fn, std::string* err) {
+ 
+ bool Program::Load(const std::string& path, const std::string& symdir,
+                    uint64_t base, std::string* err) {
+-  const bool image_x64 = recomp::PeImage::IsX64File(path);
++  const bool xbe = recomp::IsXbeFile(path);
++  const bool image_x64 = !xbe && recomp::PeImage::IsX64File(path);
+   if (!mem.base()) {
+     x64 = image_x64;
+     if (!mem.Reserve(x64 ? 36 : 32)) {
+@@ -55,13 +57,24 @@ bool Program::Load(const std::string& path, const std::string& symdir,
+   }
+   Module& m = modules.emplace_back();
+   m.name = std::filesystem::path(path).stem().string();
+-  if (!m.img.Load(path, mem, err, base)) {
++  if (xbe) {
++    // An Xbox executable: its code is .text plus the executable sections
++    // that follow it (xbe_image.h).
++    recomp::XbeInfo xi;
++    if (base || modules.size() > 1) {
++      *err = "an XBE is always the only module, at its own base";
++      return false;
++    }
++    if (!recomp::LoadXbe(path, mem, &m.img, &xi, err)) return false;
++    m.text_lo = xi.code_lo;
++    m.text_hi = xi.code_hi;
++  } else if (!m.img.Load(path, mem, err, base)) {
+     if (modules.size() > 1) *err += " (give the module another --base)";
+     return false;
+   }
+   const recomp::PeImage& img = m.img;
+   for (const auto& s : img.sections)
+-    if (s.name == ".text") {
++    if (!xbe && s.name == ".text") {
+       m.text_lo = s.va;
+       m.text_hi = s.va + s.vsize;
+     }
+@@ -122,12 +135,15 @@ bool Program::Load(const std::string& path, const std::string& symdir,
+ 
+   if (img.entry) {
+     entries.insert(img.entry);
+-    names.emplace(img.entry, img.dll ? "_DllMainCRTStartup" : "WinMainCRTStartup");
++    names.emplace(img.entry, xbe ? "XbeEntry" : img.dll ? "_DllMainCRTStartup" : "WinMainCRTStartup");
+   }
+ 
+   // Imports that never return; a call through their IAT slot ends a block.
+   for (const auto& imp : img.imports)
+-    if (imp.name == "ExitProcess" || imp.name == "ExitThread")
++    if (imp.name == "ExitProcess" || imp.name == "ExitThread" ||
++        (imp.dll == "xboxkrnl.exe" &&  // HalReturnToFirmware, KeBugCheck,
++         (imp.name == "#49" || imp.name == "#95" ||  // KeBugCheckEx,
++          imp.name == "#96" || imp.name == "#258")))  // PsTerminateSystemThread
+       noreturn_iat.insert(imp.iat_va);
+   return true;
+ }
+@@ -161,6 +177,10 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
+       names[va] = name;
+     } else if (kind == "resume") {
+       resume_sites.insert(va);
++    } else if (kind == "sehprolog") {
++      entries.insert(va);
++      seh_prologs.insert(va);
++      if (!name.empty()) names[va] = name;
+     } else if (kind == "setjmp") {
+       entries.insert(va);
+       setjmps.insert(va);
+diff --git a/tools/lifter/program.h b/tools/lifter/program.h
+index 1c35e5a..5638214 100644
+--- a/tools/lifter/program.h
++++ b/tools/lifter/program.h
+@@ -27,6 +27,11 @@ struct Program {
+   recomp::GuestMemory mem;
+   std::vector<Module> modules;  // [0] is the EXE
+   bool x64 = false;  // PE32+ AMD64 images (all modules are one or the other)
++  // --overridable: every direct call and tail call goes through a
++  // per-function pointer (fp_<VA>, defined in table.cpp and listed in
++  // kLiftedSlots), so a runtime can replace any function at startup
++  // without re-lifting.
++  bool overridable = false;
+ 
+   std::set<uint64_t> entries;                 // function entry points
+   // Entries known only from pointer scans (a dword in data or an
+@@ -51,6 +56,10 @@ struct Program {
+   std::set<uint64_t> resume_sites;            // manifest: calls/jmps that
+                                               // abandon the stack (SEH,
+                                               // longjmp)
++  std::set<uint64_t> seh_prologs;             // manifest: helpers that
++                                              // register their caller's SEH
++                                              // frame (e.g. __SEH_prolog):
++                                              // callers are resumable
+   std::set<uint64_t> setjmps;                 // manifest: setjmp functions
+                                               // (their callers can be
+                                               // resumed by longjmp)
+@@ -68,7 +77,7 @@ struct Program {
+   bool Load(const std::string& path, const std::string& symdir, uint64_t base,
+             std::string* err);
+ 
+-  // Applies the manifest of the module loaded last (entry/name/probe/
++  // Applies the manifest of the module loaded last (entry/name/probe/sehprolog/
+   // resume/replace/setjmp lines, VAs at its preferred base).
+   bool LoadManifest(const std::string& path, std::string* err);
+ 

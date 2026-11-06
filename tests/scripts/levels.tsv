@@ -1,0 +1,44 @@
+# row	chapter	name	expected geo (regex on the opened .geo files; proves the right map loaded)	[quiet]
+# quiet: the level is entered without music on a direct load (its .mpf loads, the music
+# engine never streams the .mus; SFX play) — the audio check is skipped, the rest applies.
+# xfail: known failure of the direct load itself, reported as XFAIL (not counted); the
+# level still runs, so a change in behaviour shows up.
+# row = index in the game's map table 0x1E3DE8 (24-byte records); chapter = story stage
+# 0x527B7C (chapter start maps in table 0x1E5AB8). Not listed: row 18 "DADA Fumos" (no init
+# function in the map table: an unused stub, loads black and silent), test maps 35..50, 58.
+0	0	The Burrow	burrow\.geo
+8	1	Leaky Cauldron	leakyc\.geo
+5	1	Diagon Alley	diagonally\.geo
+4	1	Borgin & Burkes	b_burkes\.geo
+6	1	Gringotts	gringott\.geo
+7	1	Mulpeppers	mulpepp\.geo
+9	1	Flourish & Blotts	f_blotts\.geo
+10	1	Gambol & Japes	g_japes\.geo
+11	1	Magical Menagerie	magmenag\.geo|mmpets\.geo
+30	2	Gryffindor Common Room	griffroom
+29	2	Grand Staircase	staircas|landing
+27	2	Entrance Hall	enthall
+16	2	Great Hall	grthall
+26	2	Hogwarts Exterior	hogwarts(_night)?\.geo
+17	2	DADA	dada\.geo	quiet
+1	2	DADA Expeliamus	expelmus\.geo
+22	2	Incendio	incendio\.geo
+23	4	Avifors Challenge	avivors\.geo
+24	3	Herbology	herbology
+2	4	Library	library\.geo
+19	4	Pre Library	prelibry\.geo
+20	4	Library Potions	librpotn
+34	5	Stealth Library	stealthlib
+33	5	Stealth Dungeons	stealthdun
+21	6	Dumbledores office	ddoffice
+12	6	Whomping Willow	whomping\.geo
+13	6	Whomping Imp Area	wimparea\.geo
+14	6	Whomping Wiggenweld	WWiggenweld\.geo
+15	6	Whomping Gytrash Area	wgytrash\.geo
+3	7	Quiddich World Cup	quiddtch\.geo
+31	8	Pink Room	pinkroom\.geo
+55	9	Aragog Arena	araarena\.geo
+56	9	Aragog Forest	araforest\.geo
+57	9	Aragog Lair	aralair\.geo
+25	11	Chamber Of Secrets	chambofs
+52	13	Game Credits	titlemap\.geo

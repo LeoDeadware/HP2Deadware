@@ -1,0 +1,20 @@
+# Inventory -> Quests page -> card album, then RT x3 (album pages). wide_book.sh.
+450 press A
+520 press DOWN 4
+540 press DOWN 4
+560 press DOWN 4
+600 press A
+700 press A
+6000 stick L 0 1 90
+6150 stick L -1 0 30
+6200 stick L 0 1 100
+6600 press BACK
+6760 press RT
+6900 press RT
+7040 press DOWN
+7100 press DOWN
+7180 press A
+7400 press RIGHT
+7400 press RT
+7600 press RT
+7800 press RT

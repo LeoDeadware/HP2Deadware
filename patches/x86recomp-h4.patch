@@ -1,0 +1,1178 @@
+diff --git a/src/runtime/dispatch.cpp b/src/runtime/dispatch.cpp
+index 2c6a3af..caa8e2d 100644
+--- a/src/runtime/dispatch.cpp
++++ b/src/runtime/dispatch.cpp
+@@ -188,7 +188,14 @@ thread_local std::exception_ptr t_fault_exception;
+ [[noreturn]] void RethrowFaultException() {
+   std::exception_ptr e = std::move(t_fault_exception);
+   t_fault_exception = nullptr;
+-  std::rethrow_exception(e);
++  try {
++    std::rethrow_exception(e);
++  } catch (const GuestResume& r) {
++    RECOMP_TRACE("  resume from a fault: to %08llX in frame %08llX (from %08llX)\n",
++                 (unsigned long long)r.target, (unsigned long long)r.ebp,
++                 (unsigned long long)r.from);
++    throw;
++  }
+ }
+ 
+ void FaultHandler(int sig, siginfo_t* si, void* uc) {
+@@ -347,6 +354,9 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
+ // The continuation runs in the owning function's catch handler, where a
+ // second throw would leave that function's try block: catch it here.
+ void Resume(Ctx& c, GuestResume r) {
++  RECOMP_TRACE("  resume at %08llX in frame %08llX (from %08llX, esp %08X)\n",
++               (unsigned long long)r.target, (unsigned long long)r.ebp,
++               (unsigned long long)r.from, uint32_t(c.esp));
+   for (;;) {
+     try {
+       if (g_proc->x64)
+diff --git a/src/runtime/gfx/device.h b/src/runtime/gfx/device.h
+index 6d8bb51..8ab360d 100644
+--- a/src/runtime/gfx/device.h
++++ b/src/runtime/gfx/device.h
+@@ -206,6 +206,14 @@ class Device {
+                              Format fmt) = 0;
+   // Shows the front buffer as it is now.
+   virtual void PresentFront() = 0;
++  // How a frame is scaled to the window when their sizes differ (the
++  // <ID>_FILTER switch; F10 cycles through them while the game runs):
++  // "nearest", "bilinear", "sharp" (sharp bilinear: crisp pixels, a
++  // one-pixel blend at their edges), "bicubic" (Catmull-Rom), "lanczos"
++  // (Lanczos-3), "bicubic-sharp" (Catmull-Rom with an unsharp mask) or
++  // "fsr" (AMD FidelityFX Super Resolution 1.0: EASU + RCAS).
++  // Backends without filters ignore it.
++  virtual void SetPresentFilter(const char* name) { (void)name; }
+ 
+   // ---- fixed-function state (D3D7 enums)
+   virtual void SetRenderState(uint32_t state, uint32_t value) = 0;
+diff --git a/src/runtime/gfx/gpu_device.cpp b/src/runtime/gfx/gpu_device.cpp
+index fba6b37..fdcdcfd 100644
+--- a/src/runtime/gfx/gpu_device.cpp
++++ b/src/runtime/gfx/gpu_device.cpp
+@@ -47,6 +47,241 @@ namespace recomp::gfx {
+ 
+ namespace {
+ 
++// ---- present filters (SetPresentFilter): the frame drawn into the window's
++// fitted rectangle by a full-screen triangle.
++
++constexpr const char* kFilterNames[] = {"nearest", "bilinear", "sharp", "bicubic", "lanczos",
++                                        "bicubic-sharp", "fsr"};
++constexpr int kFilterCount = 7;
++constexpr int kFsr = 6;  // kFilterNames index of "fsr" (two passes, see kPresentFrag)
++
++constexpr const char* kPresentVert = R"(#version 450
++layout(location = 0) out vec2 uv;
++void main() {
++  vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
++  uv = p;
++  gl_Position = vec4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
++}
++)";
++
++// size: the frame's w, h, 1/w, 1/h; dst: the output rectangle's w, h;
++// mode.x: 0 sharp, 1 bicubic, 2 lanczos, 3 bicubic-sharp, 4 fsr's EASU,
++// 5 fsr's RCAS.
++//
++// fsr: AMD FidelityFX Super Resolution 1.0, EASU (edge-adaptive spatial
++// upsampling) then RCAS (robust contrast-adaptive sharpening), in two passes
++// as FidelityFX does them: EASU into an output-sized texture, then RCAS
++// reading that texture at the pixel and its four neighbours (in one pass,
++// EASU ran five times per pixel and the present stalled the game). Ported from
++// ffx_fsr1.h (FidelityFX FSR 1.0), Copyright (c) 2021 Advanced Micro Devices,
++// Inc., MIT License: permission is hereby granted, free of charge, to any
++// person obtaining a copy of this software and associated documentation
++// files, to deal in the Software without restriction, provided the copyright
++// notice and this permission notice are included in all copies or
++// substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS",
++// WITHOUT WARRANTY OF ANY KIND.
++constexpr const char* kPresentFrag = R"(#version 450
++layout(location = 0) in vec2 uv;
++layout(location = 0) out vec4 frag;
++layout(set = 2, binding = 0) uniform sampler2D src;
++layout(std140, set = 3, binding = 0) uniform Params {
++  vec4 size;
++  vec4 dst;
++  ivec4 mode;
++};
++
++vec3 Tex(vec2 p) { return textureLod(src, p, 0.0).rgb; }
++vec3 Texel(ivec2 i) { return texelFetch(src, clamp(i, ivec2(0), ivec2(size.xy) - 1), 0).rgb; }
++
++// Sharp bilinear: each frame pixel keeps its colour over its output area,
++// blending only across the output pixel that straddles its edge.
++vec3 Sharp(vec2 p) {
++  vec2 scale = max(dst.xy * size.zw, vec2(1.0));
++  vec2 t = p * size.xy;
++  vec2 c = fract(t) - 0.5;
++  vec2 r = 0.5 - 0.5 / scale;
++  vec2 f = (c - clamp(c, -r, r)) * scale + 0.5;
++  return Tex((floor(t) + f) * size.zw);
++}
++
++// Catmull-Rom in 9 bilinear taps.
++vec3 CatmullRom(vec2 p) {
++  vec2 pos = p * size.xy;
++  vec2 tc = floor(pos - 0.5) + 0.5;
++  vec2 f = pos - tc;
++  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
++  vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
++  vec2 w3 = f * f * (-0.5 + 0.5 * f);
++  vec2 w12 = w1 + w2;
++  vec2 t0 = (tc - 1.0) * size.zw, t3 = (tc + 2.0) * size.zw, t12 = (tc + w2 / w12) * size.zw;
++  vec3 r = (Tex(vec2(t0.x, t0.y)) * w0.x + Tex(vec2(t12.x, t0.y)) * w12.x + Tex(vec2(t3.x, t0.y)) * w3.x) * w0.y
++         + (Tex(vec2(t0.x, t12.y)) * w0.x + Tex(vec2(t12.x, t12.y)) * w12.x + Tex(vec2(t3.x, t12.y)) * w3.x) * w12.y
++         + (Tex(vec2(t0.x, t3.y)) * w0.x + Tex(vec2(t12.x, t3.y)) * w12.x + Tex(vec2(t3.x, t3.y)) * w3.x) * w3.y;
++  return clamp(r, 0.0, 1.0);
++}
++
++float L3(float x) {
++  x = abs(x);
++  if (x < 1e-5) return 1.0;
++  if (x >= 3.0) return 0.0;
++  float px = 3.14159265 * x;
++  return 3.0 * sin(px) * sin(px / 3.0) / (px * px);
++}
++
++vec3 Lanczos3(vec2 p) {
++  vec2 pos = p * size.xy - 0.5;
++  vec2 base = floor(pos);
++  vec2 f = pos - base;
++  vec3 sum = vec3(0.0);
++  float wsum = 0.0;
++  for (int j = -2; j <= 3; j++) {
++    float wy = L3(float(j) - f.y);
++    for (int i = -2; i <= 3; i++) {
++      float w = L3(float(i) - f.x) * wy;
++      sum += Texel(ivec2(base) + ivec2(i, j)) * w;
++      wsum += w;
++    }
++  }
++  return clamp(sum / wsum, 0.0, 1.0);
++}
++
++// ---- FSR 1: EASU
++float Luma(vec3 c) { return c.b * 0.5 + (c.r * 0.5 + c.g); }
++
++// One bilinear quadrant's contribution to the edge direction and length:
++// a above, b left, c centre, d right, e below.
++void EasuSet(inout vec2 dir, inout float len, float w, float la, float lb, float lc, float ld,
++             float le) {
++  float dc = ld - lc, cb = lc - lb;
++  float lenX = 1.0 / max(max(abs(dc), abs(cb)), 1.0 / 32768.0);
++  float dirX = ld - lb;
++  dir.x += dirX * w;
++  lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
++  len += lenX * lenX * w;
++  float ec = le - lc, ca = lc - la;
++  float lenY = 1.0 / max(max(abs(ec), abs(ca)), 1.0 / 32768.0);
++  float dirY = le - la;
++  dir.y += dirY * w;
++  lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
++  len += lenY * lenY * w;
++}
++
++// A tap of the anisotropic, windowed Lanczos-like kernel.
++void EasuTap(inout vec3 ac, inout float aw, vec2 off, vec2 dir, vec2 len2, float lob,
++             float clp, vec3 c) {
++  vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len2;
++  float d2 = min(v.x * v.x + v.y * v.y, clp);
++  float wB = 2.0 / 5.0 * d2 - 1.0;
++  float wA = lob * d2 - 1.0;
++  wB *= wB;
++  wA *= wA;
++  wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);
++  float w = wB * wA;
++  ac += c * w;
++  aw += w;
++}
++
++// The frame upscaled at output position p (output pixels, centres at +0.5).
++vec3 Easu(vec2 p) {
++  vec2 pp = p * size.xy / dst.xy - 0.5;  // input pixel space, centres on integers
++  vec2 fp = floor(pp);
++  pp -= fp;
++  ivec2 i = ivec2(fp);
++  //    b c
++  //  e f g h
++  //  i j k l
++  //    n o
++  vec3 b = Texel(i + ivec2(0, -1)), c = Texel(i + ivec2(1, -1));
++  vec3 e = Texel(i + ivec2(-1, 0)), f = Texel(i), g = Texel(i + ivec2(1, 0)),
++       h = Texel(i + ivec2(2, 0));
++  vec3 ii = Texel(i + ivec2(-1, 1)), j = Texel(i + ivec2(0, 1)), k = Texel(i + ivec2(1, 1)),
++       l = Texel(i + ivec2(2, 1));
++  vec3 n = Texel(i + ivec2(0, 2)), o = Texel(i + ivec2(1, 2));
++  float bL = Luma(b), cL = Luma(c), eL = Luma(e), fL = Luma(f), gL = Luma(g), hL = Luma(h);
++  float iL = Luma(ii), jL = Luma(j), kL = Luma(k), lL = Luma(l), nL = Luma(n), oL = Luma(o);
++  vec2 dir = vec2(0.0);
++  float len = 0.0;
++  EasuSet(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
++  EasuSet(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);
++  EasuSet(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);
++  EasuSet(dir, len, pp.x * pp.y, gL, jL, kL, lL, oL);
++  float dirR = dir.x * dir.x + dir.y * dir.y;
++  bool zro = dirR < 1.0 / 32768.0;
++  dirR = zro ? 1.0 : inversesqrt(dirR);
++  dir.x = zro ? 1.0 : dir.x;
++  dir *= dirR;
++  len = len * 0.5;
++  len *= len;
++  float stretch = (dir.x * dir.x + dir.y * dir.y) / max(abs(dir.x), abs(dir.y));
++  vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
++  float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
++  float clp = 1.0 / lob;
++  vec3 ac = vec3(0.0);
++  float aw = 0.0;
++  EasuTap(ac, aw, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, b);
++  EasuTap(ac, aw, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, c);
++  EasuTap(ac, aw, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, ii);
++  EasuTap(ac, aw, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);
++  EasuTap(ac, aw, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, f);
++  EasuTap(ac, aw, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
++  EasuTap(ac, aw, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, k);
++  EasuTap(ac, aw, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, l);
++  EasuTap(ac, aw, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, h);
++  EasuTap(ac, aw, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);
++  EasuTap(ac, aw, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, o);
++  EasuTap(ac, aw, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);
++  // Deringing: stay within the four nearest input pixels.
++  vec3 mn = min(min(f, g), min(j, k)), mx = max(max(f, g), max(j, k));
++  return clamp(ac / aw, mn, mx);
++}
++
++// ---- FSR 1: RCAS, sharpness 0.2 stops (FidelityFX's default), over the
++// EASU pass's result (src, size = its size).
++vec3 Rcas(vec2 uv) {
++  ivec2 ip = ivec2(uv * size.xy);
++  vec3 e = Texel(ip);
++  vec3 b = Texel(ip + ivec2(0, -1)), d = Texel(ip + ivec2(-1, 0));
++  vec3 f = Texel(ip + ivec2(1, 0)), h = Texel(ip + ivec2(0, 1));
++  vec3 mn4 = min(min(b, d), min(f, h)), mx4 = max(max(b, d), max(f, h));
++  vec3 hitMin = min(mn4, e) / (4.0 * mx4 + 1e-5);
++  vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * min(mn4, e) - 4.0 - 1e-5);
++  vec3 lobeRGB = max(-hitMin, hitMax);
++  const float kSharpness = exp2(-0.2);
++  float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) *
++               kSharpness;
++  return clamp((lobe * (b + d + h + f) + e) / (4.0 * lobe + 1.0), 0.0, 1.0);
++}
++
++void main() {
++  vec3 c;
++  if (mode.x == 4) {
++    c = Easu(uv * dst.xy);
++  } else if (mode.x == 5) {
++    c = Rcas(uv);
++  } else if (mode.x == 0) {
++    c = Sharp(uv);
++  } else if (mode.x == 1) {
++    c = CatmullRom(uv);
++  } else if (mode.x == 2) {
++    c = Lanczos3(uv);
++  } else {
++    vec2 d = 1.0 / dst.xy;
++    c = CatmullRom(uv);
++    vec3 n = CatmullRom(uv + vec2(d.x, 0.0)) + CatmullRom(uv - vec2(d.x, 0.0)) +
++             CatmullRom(uv + vec2(0.0, d.y)) + CatmullRom(uv - vec2(0.0, d.y));
++    c = clamp(c + 0.6 * (c - 0.25 * n), 0.0, 1.0);
++  }
++  frag = vec4(c, 1.0);
++}
++)";
++
++struct PresentParams {
++  float size[4];
++  float dst[4];
++  int32_t mode[4];
++};
++
+ // ---- uniform blocks (layouts mirror the shaders')
+ 
+ struct GpuLight {
+@@ -1826,7 +2061,106 @@ void r_color0(inout vec4 c) {
+ 
+   // Front buffer to the window: scaled to fit with its aspect kept,
+   // black around it (FitRect).
++  void SetPresentFilter(const char* name) override {
++    for (int i = 0; i < kFilterCount; i++)
++      if (!std::strcmp(name, kFilterNames[i])) {
++        filter_ = i;
++        return;
++      }
++    WarnF("gfx: unknown filter '%s' (nearest, bilinear, sharp, bicubic, lanczos, bicubic-sharp, fsr)\n",
++          name);
++  }
++
++  // F10: the next filter.
++  void PollFilterKey() {
++    const bool* keys = SDL_GetKeyboardState(nullptr);
++    const bool down = keys && keys[SDL_SCANCODE_F10];
++    if (down && !filter_key_down_) {
++      filter_ = (filter_ + 1) % kFilterCount;
++      WarnF("gfx: filter %s\n", kFilterNames[filter_]);
++    }
++    filter_key_down_ = down;
++  }
++
++  SDL_GPUShader* CompilePresentShader(const char* glsl, bool vertex) {
++    std::vector<uint32_t> spirv;
++    std::string log;
++    if (!GlslToSpirv(glsl, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, &spirv, &log))
++      FatalF("gfx: compiling a present filter: %s", log.c_str());
++    SDL_GPUShaderCreateInfo si{};
++#if defined(__APPLE__)
++    std::string msl;
++    if (!SpirvToMsl(spirv, &msl, &log)) FatalF("gfx: SPIR-V to MSL: %s", log.c_str());
++    si.code = reinterpret_cast<const Uint8*>(msl.c_str());
++    si.code_size = msl.size();
++    si.entrypoint = "main0";
++    si.format = SDL_GPU_SHADERFORMAT_MSL;
++#else
++    si.code = reinterpret_cast<const Uint8*>(spirv.data());
++    si.code_size = spirv.size() * 4;
++    si.entrypoint = "main";
++    si.format = SDL_GPU_SHADERFORMAT_SPIRV;
++#endif
++    si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
++    si.num_samplers = vertex ? 0 : 1;
++    si.num_uniform_buffers = vertex ? 0 : 1;
++    SDL_GPUShader* sh = SDL_CreateGPUShader(dev_, &si);
++    if (!sh) FatalF("gfx: SDL_CreateGPUShader (present filter): %s", SDL_GetError());
++    return sh;
++  }
++
++  // The texture FSR's EASU pass renders into (the swap chain's format, so
++  // the present pipeline serves both passes), w x h.
++  SDL_GPUTexture* FsrTexture(int w, int h) {
++    if (fsr_tex_ && fsr_w_ == w && fsr_h_ == h) return fsr_tex_;
++    if (fsr_tex_) SDL_ReleaseGPUTexture(dev_, fsr_tex_);
++    SDL_GPUTextureCreateInfo ti{};
++    ti.type = SDL_GPU_TEXTURETYPE_2D;
++    ti.format = SDL_GetGPUSwapchainTextureFormat(dev_, window_);
++    ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
++    ti.width = Uint32(w);
++    ti.height = Uint32(h);
++    ti.layer_count_or_depth = 1;
++    ti.num_levels = 1;
++    fsr_tex_ = SDL_CreateGPUTexture(dev_, &ti);
++    if (!fsr_tex_) FatalF("gfx: FSR texture %dx%d: %s", w, h, SDL_GetError());
++    fsr_w_ = w;
++    fsr_h_ = h;
++    return fsr_tex_;
++  }
++
++  // The present pipeline for the swap chain's format (built on first use).
++  SDL_GPUGraphicsPipeline* PresentPipeline() {
++    const SDL_GPUTextureFormat fmt = SDL_GetGPUSwapchainTextureFormat(dev_, window_);
++    if (present_pipe_ && present_fmt_ == fmt) return present_pipe_;
++    if (!present_vs_) {
++      present_vs_ = CompilePresentShader(kPresentVert, true);
++      present_fs_ = CompilePresentShader(kPresentFrag, false);
++      SDL_GPUSamplerCreateInfo si{};
++      si.min_filter = si.mag_filter = SDL_GPU_FILTER_LINEAR;
++      si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
++      si.address_mode_u = si.address_mode_v = si.address_mode_w =
++          SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
++      present_sampler_ = SDL_CreateGPUSampler(dev_, &si);
++    }
++    if (present_pipe_) SDL_ReleaseGPUGraphicsPipeline(dev_, present_pipe_);
++    SDL_GPUColorTargetDescription ct{};
++    ct.format = fmt;
++    SDL_GPUGraphicsPipelineCreateInfo pi{};
++    pi.vertex_shader = present_vs_;
++    pi.fragment_shader = present_fs_;
++    pi.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
++    pi.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
++    pi.target_info.color_target_descriptions = &ct;
++    pi.target_info.num_color_targets = 1;
++    present_pipe_ = SDL_CreateGPUGraphicsPipeline(dev_, &pi);
++    if (!present_pipe_) FatalF("gfx: present pipeline: %s", SDL_GetError());
++    present_fmt_ = fmt;
++    return present_pipe_;
++  }
++
+   void Show(SDL_GPUCommandBuffer* cmd) {
++    PollFilterKey();
+     SDL_GPUTexture* sc = nullptr;
+     Uint32 sw = 0, sh = 0;
+     if (mailbox_emulated_) {
+@@ -1870,8 +2204,58 @@ void r_color0(inout vec4 c) {
+       SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &t, 1, nullptr));
+       b.load_op = SDL_GPU_LOADOP_LOAD;
+     }
+-    b.filter = (w == bb_w_ && h == bb_h_) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
+-    SDL_BlitGPUTexture(cmd, &b);
++    const bool scaled = w != bb_w_ || h != bb_h_;
++    if (scaled && filter_ == kFsr) {
++      // FSR's EASU pass, into an output-sized texture.
++      SDL_GPUColorTargetInfo et{};
++      et.texture = FsrTexture(w, h);
++      et.load_op = SDL_GPU_LOADOP_DONT_CARE;
++      et.store_op = SDL_GPU_STOREOP_STORE;
++      SDL_GPURenderPass* ep = SDL_BeginGPURenderPass(cmd, &et, 1, nullptr);
++      SDL_GPUViewport evp{0.0f, 0.0f, float(w), float(h), 0.0f, 1.0f};
++      SDL_SetGPUViewport(ep, &evp);
++      SDL_BindGPUGraphicsPipeline(ep, PresentPipeline());
++      SDL_GPUTextureSamplerBinding fb{front_, present_sampler_};
++      SDL_BindGPUFragmentSamplers(ep, 0, &fb, 1);
++      PresentParams ep_params{
++          {float(bb_w_), float(bb_h_), 1.0f / float(bb_w_), 1.0f / float(bb_h_)},
++          {float(w), float(h), 0.0f, 0.0f},
++          {4, 0, 0, 0}};
++      SDL_PushGPUFragmentUniformData(cmd, 0, &ep_params, sizeof ep_params);
++      SDL_DrawGPUPrimitives(ep, 3, 1, 0, 0);
++      SDL_EndGPURenderPass(ep);
++    }
++    if (scaled && filter_ >= 2) {
++      // A filter: drawn into the fitted rectangle, the bars cleared.
++      SDL_GPUColorTargetInfo t{};
++      t.texture = sc;
++      t.load_op = SDL_GPU_LOADOP_CLEAR;
++      t.store_op = SDL_GPU_STOREOP_STORE;
++      t.clear_color = {0, 0, 0, 1};
++      SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &t, 1, nullptr);
++      SDL_GPUViewport vp{float(r.left), float(r.top), float(w), float(h), 0.0f, 1.0f};
++      SDL_SetGPUViewport(rp, &vp);
++      SDL_BindGPUGraphicsPipeline(rp, PresentPipeline());
++      SDL_GPUTextureSamplerBinding tb{front_, present_sampler_};
++      SDL_BindGPUFragmentSamplers(rp, 0, &tb, 1);
++      PresentParams pp{{float(bb_w_), float(bb_h_), 1.0f / float(bb_w_), 1.0f / float(bb_h_)},
++                       {float(w), float(h), 0.0f, 0.0f},
++                       {filter_ - 2, 0, 0, 0}};
++      if (filter_ == kFsr) {
++        // RCAS over the EASU pass's output-sized texture.
++        SDL_GPUTextureSamplerBinding eb{FsrTexture(w, h), present_sampler_};
++        SDL_BindGPUFragmentSamplers(rp, 0, &eb, 1);
++        pp = {{float(w), float(h), 1.0f / float(w), 1.0f / float(h)},
++              {float(w), float(h), 0.0f, 0.0f},
++              {5, 0, 0, 0}};
++      }
++      SDL_PushGPUFragmentUniformData(cmd, 0, &pp, sizeof pp);
++      SDL_DrawGPUPrimitives(rp, 3, 1, 0, 0);
++      SDL_EndGPURenderPass(rp);
++    } else {
++      b.filter = !scaled || filter_ == 0 ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
++      SDL_BlitGPUTexture(cmd, &b);
++    }
+     NotePresentation({bb_w_, bb_h_, int(sw), int(sh), r});
+   }
+ 
+@@ -2540,6 +2924,15 @@ void r_color0(inout vec4 c) {
+   SDL_GPUTextureFormat depth24s8_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
+   SDL_GPUTexture* backbuffer_ = nullptr;  // the game's back buffer
+   SDL_GPUTexture* front_ = nullptr;       // the DirectDraw primary
++  int filter_ = 1;                        // kFilterNames: bilinear unless set
++  bool filter_key_down_ = false;
++  SDL_GPUShader* present_vs_ = nullptr;
++  SDL_GPUShader* present_fs_ = nullptr;
++  SDL_GPUSampler* present_sampler_ = nullptr;
++  SDL_GPUGraphicsPipeline* present_pipe_ = nullptr;
++  SDL_GPUTextureFormat present_fmt_ = SDL_GPU_TEXTUREFORMAT_INVALID;
++  SDL_GPUTexture* fsr_tex_ = nullptr;
++  int fsr_w_ = 0, fsr_h_ = 0;
+   SDL_GPUTexture* dummy_ = nullptr;
+   int bb_w_ = 0, bb_h_ = 0;
+   // Mailbox emulated on vsync (ResetSwapChain, Show).
+diff --git a/src/runtime/hle/advapi32.cpp b/src/runtime/hle/advapi32.cpp
+index 28458ca..4a8691e 100644
+--- a/src/runtime/hle/advapi32.cpp
++++ b/src/runtime/hle/advapi32.cpp
+@@ -58,7 +58,12 @@ void Seed() {
+     for (size_t i = k.find('\\', k.find('\\') + 1); i != std::string::npos;
+          i = k.find('\\', i + 1))
+       g_reg[k.substr(0, i)];
+-    g_reg[k][Lower(r.name)] = Str(r.value);
++    if (r.type == 4) {
++      uint32_t n = uint32_t(std::stoul(r.value));
++      g_reg[k][Lower(r.name)] = RegValue{4, {uint8_t(n), uint8_t(n >> 8), uint8_t(n >> 16), uint8_t(n >> 24)}};
++    } else {
++      g_reg[k][Lower(r.name)] = Str(r.value);
++    }
+   }
+ }
+ 
+diff --git a/src/runtime/hle/binkw32.cpp b/src/runtime/hle/binkw32.cpp
+index cb5bc56..ef86ec1 100644
+--- a/src/runtime/hle/binkw32.cpp
++++ b/src/runtime/hle/binkw32.cpp
+@@ -40,7 +40,8 @@ namespace {
+ 
+ using Clock = std::chrono::steady_clock;
+ 
+-constexpr uint32_t kBinkFromMemory = 0x04000000, kBinkSndTrack = 0x00004000;
++constexpr uint32_t kBinkFromMemory = 0x04000000, kBinkFileHandle = 0x00800000,
++                   kBinkSndTrack = 0x00004000;
+ constexpr uint32_t kBinkStructSize = 0x400;
+ 
+ // BINK struct offsets (bink.h, 1.x; the track fields as 1.8 games read
+@@ -355,6 +356,32 @@ HLE_NAMED("binkw32.dll", "_BinkOpen@8", BinkOpen, 2) {
+     }
+     m->data.assign(GPtr(src), GPtr(src) + size);
+     what = "memory";
++  } else if (flags & kBinkFileHandle) {
++    // A Win32 file handle positioned at the movie (games that keep their
++    // movies inside an archive): read the header, then the rest, through
++    // ReadFile as the game would see it.
++    gaddr buf = HeapAllocProcess(65536 + 8, false);
++    auto read = [&](uint32_t n) -> bool {
++      Wr32(buf + 65536, 0);
++      return CallGuest(c, ThunkFor("kernel32.dll", "ReadFile"), {src, buf, n, buf + 65536, 0}) &&
++             Rd32(buf + 65536) == n;
++    };
++    bool ok = read(8) && std::memcmp(GPtr(buf), "BIK", 3) == 0;
++    uint32_t size = ok ? Le32(GPtr(buf) + 4) + 8 : 0;
++    if (ok) m->data.assign(GPtr(buf), GPtr(buf) + 8);
++    while (ok && m->data.size() < size) {
++      uint32_t n = std::min<uint32_t>(65536, size - uint32_t(m->data.size()));
++      ok = read(n);
++      if (ok) m->data.insert(m->data.end(), GPtr(buf), GPtr(buf) + n);
++    }
++    HeapFreeProcess(buf);
++    char h[16];
++    std::snprintf(h, sizeof h, "handle %X", src);
++    what = h;
++    if (!ok) {
++      WarnF("binkw32: BinkOpen(%s): no Bink movie at the file position\n", what.c_str());
++      return 0;
++    }
+   } else {
+     what = GStr(src);
+     FILE* f = std::fopen(HostPath(what).c_str(), "rb");
+diff --git a/src/runtime/hle/ddraw.cpp b/src/runtime/hle/ddraw.cpp
+index deb16f8..93de947 100644
+--- a/src/runtime/hle/ddraw.cpp
++++ b/src/runtime/hle/ddraw.cpp
+@@ -183,6 +183,7 @@ void PixelFormatFromFormat(gfx::Format f, DDPIXELFORMAT* pf) {
+ 
+ Surface::~Surface() {
+   State& s = g_state;
++  if (s.primary == this) s.primary = nullptr;
+   if (s.gfx) {
+     if (tex && level == 0) s.gfx->DestroyTexture(tex);
+     if (depth) s.gfx->DestroyDepth(depth);
+@@ -306,6 +307,7 @@ uint32_t CreateSurfaceImpl(uint32_t desc_va, uint32_t* out) {
+                            caps | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
+                                DDSCAPS_FRONTBUFFER,
+                            caps2);
++    g_state.primary = prim.get();
+     uint32_t backs = (d.dwFlags & DDSD_BACKBUFFERCOUNT) ? d.dwBackBufferCount : 0;
+     if (backs) {
+       prim->desc.dwFlags |= DDSD_BACKBUFFERCOUNT;
+@@ -469,6 +471,7 @@ void Pull(Surface& s, const guest::RECT& r) {
+ void PushFront(Surface& s, const gfx::Rect& r) {
+   if (r.right <= r.left || r.bottom <= r.top) return;
+   Gfx()->BlitFront(GPtr(s.mem), s.pitch, s.fmt, r, r);
++  hle::ShotFromMemory(GPtr(s.mem), s.pitch, s.fmt, s.width, s.height);
+   if (SDL_GetTicks() - g_last_present_ms > 50) Gfx()->PresentFront();
+ }
+ 
+@@ -677,7 +680,18 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::SetDisplayMode", DD7_SetDisplayMode, 6) {
+   s.mode_bpp = bpp;
+   // The "mode" is the window's client size; the desktop is left alone.
+   SetExclusiveMode(s.hwnd, w, h);
+-  if (s.gfx) s.gfx->ResetSwapChain(w, h, s.vsync);
++  if (s.gfx) {
++    s.gfx->ResetSwapChain(w, h, s.vsync);
++    // The new front buffer starts black. Games that draw on the primary
++    // and only repaint what changed (setting the same mode again when they
++    // are reactivated) would leave the rest black: show the primary's
++    // image again.
++    Surface* p = s.primary;
++    if (p && p->mem && p->width == w && p->height == h) {
++      s.gfx->BlitFront(GPtr(p->mem), p->pitch, p->fmt, {0, 0, w, h}, {0, 0, w, h});
++      s.gfx->PresentFront();
++    }
++  }
+   return DD_OK;
+ }
+ 
+diff --git a/src/runtime/hle/ddraw_impl.h b/src/runtime/hle/ddraw_impl.h
+index a819564..c42ee84 100644
+--- a/src/runtime/hle/ddraw_impl.h
++++ b/src/runtime/hle/ddraw_impl.h
+@@ -72,6 +72,7 @@ struct State {
+   int mode_w = 0, mode_h = 0, mode_bpp = 0;
+   std::unique_ptr<gfx::Device> gfx;
+   Surface* backbuffer = nullptr;  // first back buffer (render target)
++  Surface* primary = nullptr;     // the primary surface, while it exists
+   bool vsync = false;
+ };
+ State& St();
+diff --git a/src/runtime/hle/kernel32.cpp b/src/runtime/hle/kernel32.cpp
+index 3b9d486..df65f5f 100644
+--- a/src/runtime/hle/kernel32.cpp
++++ b/src/runtime/hle/kernel32.cpp
+@@ -329,7 +329,9 @@ HLE("kernel32.dll", GetEnvironmentVariableA, 3) {
+ 
+ // value null: delete the variable.
+ uint32_t SetEnvVar(const std::string& name, const std::string* value) {
+-  if (name.empty() || name.find('=') != std::string::npos) {
++  // A leading '=' is allowed: the CRT's _chdir keeps each drive's current
++  // directory in a variable named "=C:" and fails if it cannot.
++  if (name.empty() || name.find('=', 1) != std::string::npos) {
+     SetLastError(kErrorInvalidParameter);
+     return 0;
+   }
+@@ -564,7 +566,11 @@ HLE("kernel32.dll", HeapDestroy, 1) {
+ HLE64("kernel32.dll", HeapAlloc, 3) {
+   GuestHeap* h = FindHeap(Arg(c, 0));
+   if (!h) FatalF("HeapAlloc on unknown heap %08llX", (unsigned long long)Arg(c, 0));
+-  return h->Alloc(Arg(c, 2), Arg(c, 1) & kHeapZeroMemory);
++  uint64_t p = h->Alloc(Arg(c, 2), Arg(c, 1) & kHeapZeroMemory);
++  if (!p && Arg(c, 2))
++    WarnF("HeapAlloc: cannot allocate %llu bytes (from %08llX)\n",
++          (unsigned long long)Arg(c, 2), (unsigned long long)Rd32(c.esp));
++  return p;
+ }
+ 
+ HLE64("kernel32.dll", HeapFree, 3) {
+@@ -648,6 +654,9 @@ HLE64("kernel32.dll", VirtualAlloc, 4) {
+   if (type & kMemReserve) {
+     gaddr base = vm.Reserve(addr, size + (addr & 0xFFFF), type & kMemTopDown);
+     if (!base) {
++      // Games report this as "out of memory": say what was asked for.
++      WarnF("VirtualAlloc: cannot reserve %llu bytes at %llX (from %08X)\n",
++            (unsigned long long)size, (unsigned long long)addr, Rd32(c.esp));
+       SetLastError(kErrorNotEnoughMemory);
+       return 0;
+     }
+diff --git a/src/runtime/hle/kernel32_file.cpp b/src/runtime/hle/kernel32_file.cpp
+index 96b46ed..7d69e0f 100644
+--- a/src/runtime/hle/kernel32_file.cpp
++++ b/src/runtime/hle/kernel32_file.cpp
+@@ -663,6 +663,21 @@ HLE("kernel32.dll", GetCurrentDirectoryA, 2) {
+   return CopyOut(buf, size, d);
+ }
+ 
++// Relative paths resolve against the new directory; the directory must
++// exist in the guest's view.
++HLE("kernel32.dll", SetCurrentDirectoryA, 1) {
++  std::string d = AbsGuest(GStr(Arg(c, 0)));
++  while (d.size() > 3 && d.back() == '\\') d.pop_back();
++  uint32_t attr = GetFileAttributes(d);
++  if (attr == 0xFFFFFFFF || !(attr & 0x10)) {  // FILE_ATTRIBUTE_DIRECTORY
++    SetLastError(kErrorPathNotFound);
++    return 0;
++  }
++  std::lock_guard<std::mutex> l(g_cwd_mu);
++  g_cwd = d;
++  return 1;
++}
++
+ HLE("kernel32.dll", GetFullPathNameA, 4) {
+   std::string full = AbsGuest(GStr(Arg(c, 0)));
+   uint32_t size = Arg(c, 1), buf = Arg(c, 2), filepart = Arg(c, 3);
+diff --git a/src/runtime/hle/kernel32_seh.cpp b/src/runtime/hle/kernel32_seh.cpp
+index db1da39..6c63ae4 100644
+--- a/src/runtime/hle/kernel32_seh.cpp
++++ b/src/runtime/hle/kernel32_seh.cpp
+@@ -8,6 +8,8 @@
+ // __except block it unwinds with RtlUnwind and then reaches a manifest
+ // `resume` site, which throws GuestResume to the owning lifted function.
+ 
++#include <execinfo.h>
++
+ #include <algorithm>
+ #include <cstring>
+ 
+@@ -77,11 +79,24 @@ bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
+   RECOMP_TRACE("  exception %08X at %08X (params %u: %08X %08X), walking SEH chain\n",
+             code, eip, nparams, nparams > 0 ? params[0] : 0,
+             nparams > 1 ? params[1] : 0);
++  // While a handler runs, Windows (ExecuteHandler) keeps a registration of
++  // its own at the head of the chain and, when the handler returns, makes
++  // that registration's `next` the head again. The VC6 CRT relies on it:
++  // _UnwindNestedFrames saves the head, unwinds to the catching frame, then
++  // links the saved registration back on top of it, and
++  // _JumpToContinuation pops exactly one registration. Without this one
++  // the saved head is the catching frame itself, which then links to
++  // itself.
++  const uint32_t nested = c.esp + 0x8;
+   for (uint32_t reg = Rd32(teb); reg != kEnd && reg; reg = Rd32(reg)) {
+     if (reg < CurrentThread()->stack_lo || reg >= CurrentThread()->stack_hi)
+       FatalF("corrupt SEH chain: record %08X outside the stack", reg);
+     uint32_t handler = Rd32(reg + 4);
++    Wr32(nested, Rd32(teb));
++    Wr32(nested + 4, ThunkFor("kernel32.dll", "@dispatcher_frame"));
++    Wr32(teb, nested);
+     uint32_t disp = CallGuest(c, handler, {rec, reg, ctx, 0});
++    Wr32(teb, Rd32(nested));
+     if (disp == kContinueExecution) {
+       if (flags & kExceptionNoncontinuable)
+         FatalF("handler %08X continued a noncontinuable exception %08X",
+@@ -107,6 +122,13 @@ bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
+   return false;
+ }
+ 
++// The handler of the dispatcher's registration (above): an exception
++// raised inside a handler, or an unwind passing through, goes on to the
++// next frame.
++HLE_NAMED("kernel32.dll", "@dispatcher_frame", DispatcherFrameHandler, kCdecl) {
++  return kContinueSearch;
++}
++
+ HLE64("kernel32.dll", RaiseException, 4) {
+   if (g_proc->x64) {  // table-based (seh64.h)
+     uint32_t code = uint32_t(Arg(c, 0)), flags = uint32_t(Arg(c, 1)), n = uint32_t(Arg(c, 2));
+@@ -207,6 +229,18 @@ void CompleteHostPage(Ctx& c, uint32_t addr) {
+ // only use the exception record. The guest stack used for the handler
+ // calls starts well below the stale ESP so live frames are not clobbered.
+ bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr) {
++  // Dev aid: <ID>_FAULT_TRACE=1 prints the host stack (lifted function
++  // names) of every fault delivered to the game, handled or not.
++  static const bool fault_trace = [] {
++    const char* e = Env("FAULT_TRACE");
++    return e && *e && *e != '0';
++  }();
++  if (fault_trace) {
++    WarnF("fault: %s at %08X (esp %08X ebp %08X)\n", write ? "write" : "read", addr, c.esp, c.ebp);
++    void* frames[32];
++    int n = backtrace(frames, 32);
++    backtrace_symbols_fd(frames, n, 2);
++  }
+   uint32_t saved_esp = c.esp;
+   // The live area below the last spilled ESP is small: stack allocations
+   // over 4 KiB go through _chkstk, which is a call (and spills). Nested
+diff --git a/src/runtime/hle/present.cpp b/src/runtime/hle/present.cpp
+index 1d15152..ffb3a7a 100644
+--- a/src/runtime/hle/present.cpp
++++ b/src/runtime/hle/present.cpp
+@@ -17,6 +17,28 @@
+ 
+ namespace recomp::hle {
+ 
++void ShotFromMemory(const uint8_t* px, uint32_t pitch, gfx::Format fmt, int w, int h) {
++  static const int every = [] {
++    const char* e = Env("SHOT_EVERY");
++    return e ? std::atoi(e) : 0;
++  }();
++  static int update = 0;
++  if (every <= 0 || ++update % every) return;
++  std::vector<uint32_t> out(size_t(w) * h);
++  const int bytes = fmt == gfx::Format::R5G6B5 ? 2 : 4;
++  for (int y = 0; y < h; y++)
++    for (int x = 0; x < w; x++)
++      out[size_t(y) * w + x] = gfx::DecodePixel(px + size_t(y) * pitch + size_t(x) * bytes, fmt);
++  SDL_Surface* surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_XRGB8888, out.data(), w * 4);
++  const char* dir = Env("SHOT_DIR");
++  char path[512];
++  std::snprintf(path, sizeof path, "%s/front_%05d.bmp", dir ? dir : ".", update);
++  if (surf) {
++    SDL_SaveBMP(surf, path);
++    SDL_DestroySurface(surf);
++  }
++}
++
+ // Dev aid: <ID>_SHOT_EVERY=N saves every Nth presented frame (from frame
+ // <ID>_SHOT_FROM on) as $<ID>_SHOT_DIR/frame_NNNNN.bmp (default dir: current
+ // directory).
+@@ -125,6 +147,7 @@ uint64_t GfxWindowFlags() {
+ std::unique_ptr<gfx::Device> CreateGfxDevice(SDL_Window* w) {
+   std::unique_ptr<gfx::Device> d = gfx::CreateDevice(GfxBackend(), w);
+   if (!d) FatalF("cannot create the graphics device");
++  if (const char* f = Env("FILTER")) d->SetPresentFilter(f);
+   return d;
+ }
+ 
+diff --git a/src/runtime/hle/present.h b/src/runtime/hle/present.h
+index 5cdc276..8e77c66 100644
+--- a/src/runtime/hle/present.h
++++ b/src/runtime/hle/present.h
+@@ -12,6 +12,10 @@
+ namespace recomp::hle {
+ 
+ void PresentFrame(gfx::Device& dev, int w, int h);
++// The same <ID>_SHOT_EVERY screenshots for a frame shown from guest memory
++// (games that draw on the primary surface instead of presenting a back
++// buffer): counts updates of that frame instead of presents.
++void ShotFromMemory(const uint8_t* px, uint32_t pitch, gfx::Format fmt, int w, int h);
+ 
+ // The gfx::Device backend every graphics API uses: <ID>_GFX=d3d9 or gpu;
+ // by default d3d9 where the build has it, else SDL_GPU.
+diff --git a/src/runtime/hle/user32_window.cpp b/src/runtime/hle/user32_window.cpp
+index 0b622ea..632f3c8 100644
+--- a/src/runtime/hle/user32_window.cpp
++++ b/src/runtime/hle/user32_window.cpp
+@@ -39,6 +39,8 @@ namespace recomp {
+ // SDL_MouseID of <ID>_TEST_INPUT "pointer" events: they stand for the host
+ // pointer, which automated (background) runs otherwise ignore.
+ constexpr SDL_MouseID kTestPointer = 0xD51D51;
++// ... and of "move"/"goto" steps (relative motion only).
++constexpr SDL_MouseID kTestRelative = 0xD51D52;
+ 
+ bool Background() {
+   static const bool bg = [] {
+@@ -57,7 +59,7 @@ enum : uint32_t {
+   WM_SIZE = 0x0005, WM_ACTIVATE = 0x0006, WM_SETFOCUS = 0x0007,
+   WM_KILLFOCUS = 0x0008, WM_SETTEXT = 0x000C, WM_GETTEXT = 0x000D,
+   WM_GETTEXTLENGTH = 0x000E, WM_CLOSE = 0x0010,
+-  WM_QUIT = 0x0012, WM_ERASEBKGND = 0x0014, WM_SHOWWINDOW = 0x0018,
++  WM_PAINT = 0x000F, WM_QUIT = 0x0012, WM_ERASEBKGND = 0x0014, WM_SHOWWINDOW = 0x0018,
+   WM_SETFONT = 0x0030, WM_GETFONT = 0x0031, WM_TIMER = 0x0113,
+   WM_ACTIVATEAPP = 0x001C, WM_NCCREATE = 0x0081, WM_NCDESTROY = 0x0082,
+   WM_NCHITTEST = 0x0084, WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_CHAR = 0x0102,
+@@ -101,6 +103,11 @@ struct Window {
+   // `title`; selection, font, image and check state are kept here.
+   uint32_t sel_lo = 0, sel_hi = 0, font = 0, image = 0, check = 0;
+   uint32_t limit = 30000;  // edit text limit (EM_SETLIMITTEXT)
++  // Update region (client coordinates; one rectangle, the union of what
++  // was invalidated): WM_PAINT is pending while `paint` is set, and the
++  // region taken with it is what BeginPaint reports.
++  bool paint = false;
++  int32_t inv[4] = {0, 0, 0, 0}, painting[4] = {0, 0, 0, 0};
+ };
+ 
+ struct Msg {
+@@ -354,6 +361,26 @@ void GameClientSize(const Window& w, int* cw, int* ch) {
+   }
+ }
+ 
++// Adds `r` (client coordinates; null: the whole client area) to the
++// window's update region, so it gets a WM_PAINT, as Windows does when a
++// window is shown, uncovered or restored. Callers hold g_mu.
++void Invalidate(Window& w, const int32_t* r) {
++  int cw, ch;
++  GameClientSize(w, &cw, &ch);
++  int32_t a[4] = {0, 0, cw, ch};
++  if (r) std::copy(r, r + 4, a);
++  if (a[2] <= a[0] || a[3] <= a[1]) return;
++  if (!w.paint) {
++    std::copy(a, a + 4, w.inv);
++  } else {
++    w.inv[0] = std::min(w.inv[0], a[0]);
++    w.inv[1] = std::min(w.inv[1], a[1]);
++    w.inv[2] = std::max(w.inv[2], a[2]);
++    w.inv[3] = std::max(w.inv[3], a[3]);
++  }
++  w.paint = true;
++}
++
+ // Host window coordinates -> client coordinates: client = (host - x0) * k.
+ // The frame (the client area) is shown fitted into the host window with
+ // its aspect kept (gfx::FitRect, as present does), so when the host window
+@@ -415,7 +442,7 @@ void AttachClip() {
+     g_clip.hwnd = ClipWindow();
+     if (Window* w = Win(g_clip.hwnd)) grab = w->sdl;
+   }
+-  if (grab && !Background()) SDL_SetWindowRelativeMouseMode(grab, true);
++  if (grab && !Background() && !Game().own_cursor) SDL_SetWindowRelativeMouseMode(grab, true);
+ }
+ 
+ void ActivateApp(uint32_t hwnd, bool active) {
+@@ -429,6 +456,10 @@ void ActivateApp(uint32_t hwnd, bool active) {
+       g_active = g_focus = 0;
+     }
+   }
++  if (active) {
++    std::lock_guard<std::recursive_mutex> l(g_mu);
++    if (Window* w = Win(hwnd)) Invalidate(*w, nullptr);
++  }
+   WatchdogAppActive(active);
+   Post(hwnd, WM_ACTIVATEAPP, active ? 1 : 0, 0);
+   Post(hwnd, WM_ACTIVATE, active ? 1 : 0, 0);
+@@ -450,6 +481,15 @@ void HandleSdlEvent(const SDL_Event& e) {
+       AttachClip();
+       if (uint32_t h = HwndForSdl(e.window.windowID)) ActivateApp(h, true);
+       break;
++    case SDL_EVENT_WINDOW_EXPOSED:
++    case SDL_EVENT_WINDOW_RESTORED:
++    case SDL_EVENT_WINDOW_SHOWN:
++    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: {
++      std::lock_guard<std::recursive_mutex> l(g_mu);
++      if (uint32_t h = HwndForSdl(e.window.windowID))
++        if (Window* w = Win(h)) Invalidate(*w, nullptr);
++      break;
++    }
+     case SDL_EVENT_WINDOW_FOCUS_LOST:
+       if (uint32_t h = HwndForSdl(e.window.windowID)) {
+         // Release keys so nothing stays stuck while we're away.
+@@ -501,21 +541,31 @@ void HandleSdlEvent(const SDL_Event& e) {
+       break;
+     }
+     case SDL_EVENT_MOUSE_MOTION: {
+-      uint32_t h = HwndForSdl(e.motion.windowID);
++      SDL_MouseMotionEvent mo = e.motion;
++      uint32_t h = HwndForSdl(mo.windowID);
+       if (!h) break;
+       int ox, oy;
+       WindowOrigin(h, &ox, &oy);
+-      const ClientMap cm = MapToClient(h);
++      ClientMap cm = MapToClient(h);
++      // <ID>_TEST_INPUT "pointer" positions are in the game's client pixels,
++      // whatever the host window's size in points. Its relative steps move
++      // an absolute pointer (Game().own_cursor) from where it is.
++      if (mo.which == kTestRelative && Game().own_cursor) {
++        mo.which = kTestPointer;
++        mo.x = float(g_mouse_x - ox) + mo.xrel;
++        mo.y = float(g_mouse_y - oy) + mo.yrel;
++      }
++      if (mo.which == kTestPointer) cm = ClientMap{};
+       int mw, mh;
+-      if (!Background() || e.motion.which == kTestPointer) {
+-        g_real_x = int((e.motion.x - cm.x0) * cm.kx);
+-        g_real_y = int((e.motion.y - cm.y0) * cm.ky);
++      if (!Background() || mo.which == kTestPointer) {
++        g_real_x = int((mo.x - cm.x0) * cm.kx);
++        g_real_y = int((mo.y - cm.y0) * cm.ky);
+         g_pointer_inside = true;
+       }
+       {
+         static float rx = 0, ry = 0;  // sub-mickey remainder
+-        rx += e.motion.xrel;
+-        ry += e.motion.yrel;
++        rx += mo.xrel;
++        ry += mo.yrel;
+         int dx = int(rx), dy = int(ry);
+         rx -= dx;
+         ry -= dy;
+@@ -524,7 +574,11 @@ void HandleSdlEvent(const SDL_Event& e) {
+       }
+       AttachClip();
+       bool clipped = g_clip.on && g_clip.hwnd == h;
+-      if (clipped || ExclusiveSize(h, &mw, &mh)) {
++      if (Game().own_cursor && !Background()) {
++        static bool hidden = false;
++        if (!hidden) hidden = SDL_HideCursor();
++      }
++      if (!Game().own_cursor && (clipped || ExclusiveSize(h, &mw, &mh))) {
+         // Virtual cursor: the game recentres it with SetCursorPos every
+         // frame and steers its own pointer by the difference, as on a
+         // fullscreen Windows desktop. Real motion moves the virtual
+@@ -534,8 +588,8 @@ void HandleSdlEvent(const SDL_Event& e) {
+         // one pixel of the game's screen, as a mickey is on Windows, so
+         // mouse look turns the same windowed, fullscreen and in any mode.
+         static float fx = 0, fy = 0;  // sub-pixel remainder
+-        fx += e.motion.xrel;
+-        fy += e.motion.yrel;
++        fx += mo.xrel;
++        fy += mo.yrel;
+         int dx = int(fx), dy = int(fy);
+         fx -= dx;
+         fy -= dy;
+@@ -547,7 +601,7 @@ void HandleSdlEvent(const SDL_Event& e) {
+           g_mouse_y = std::clamp(g_mouse_y + dy, oy, oy + mh - 1);
+         }
+       } else {
+-        int x = int((e.motion.x - cm.x0) * cm.kx), y = int((e.motion.y - cm.y0) * cm.ky);
++        int x = int((mo.x - cm.x0) * cm.kx), y = int((mo.y - cm.y0) * cm.ky);
+         if (cm.fitted) {
+           // Over the black bars: the pointer is at the screen's edge.
+           x = std::clamp(x, 0, std::max(cm.cw - 1, 0));
+@@ -641,6 +695,18 @@ bool TakeMessage(uint32_t hwnd, uint32_t lo, uint32_t hi, bool remove, Msg* out)
+     if (remove) q.quit = false;
+     return true;
+   }
++  // WM_PAINT comes after posted messages and before timers.
++  for (auto& [h, w] : g_windows) {
++    if (!w.paint || w.destroyed || !w.visible || w.tid != CurrentThread()->tid) continue;
++    Msg m{h, WM_PAINT, 0, 0, TickCount(), g_mouse_x, g_mouse_y};
++    if (!Matches(m, hwnd, lo, hi)) continue;
++    *out = m;
++    if (remove) {
++      std::copy(w.inv, w.inv + 4, w.painting);
++      w.paint = false;
++    }
++    return true;
++  }
+   const uint32_t now = TickCount();
+   for (Timer& t : g_timers) {
+     Msg m{t.hwnd, WM_TIMER, t.id, t.proc, now, g_mouse_x, g_mouse_y};
+@@ -780,7 +846,13 @@ bool OnMainThread() { return std::this_thread::get_id() == g_main_thread_id; }
+ void EnsureSdlVideo() {
+   if (g_sdl_up) return;
+   if (!OnMainThread()) FatalF("SDL video requested off the main thread");
+-  if (Background()) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
++  if (Background()) {
++    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
++    // macOS: an accessory process (no Dock icon) that never becomes the
++    // active application, so automated runs leave the user's focus and
++    // Space alone.
++    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
++  }
+   // Leave SIGINT/SIGTERM alone: SDL would turn them into quit events the
+   // game may ignore, making the process hard to stop.
+   SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+@@ -844,7 +916,7 @@ void InjectTestFocus() {
+ //   <t> move <dx> <dy>    relative motion
+ //   <t> pointer <x> <y>   the host pointer is at client (x, y) (the
+ //                         game's cursor should follow it exactly)
+-//   <t> click [left|right]
++//   <t> click [left|right] [seconds]   held for that long (default 0.08)
+ //   <t> key <SDL scancode name> [seconds]   e.g. Escape, Return, Space, A;
+ //                         held for that long (default 0.08)
+ // '#' starts a comment.
+@@ -872,6 +944,7 @@ void InjectTestInput() {
+     auto motion = [](double t, float dx, float dy) {
+       SDL_Event e{};
+       e.type = SDL_EVENT_MOUSE_MOTION;
++      e.motion.which = kTestRelative;
+       e.motion.xrel = dx;
+       e.motion.yrel = dy;
+       return TestEvent{t, e};
+@@ -917,7 +990,9 @@ void InjectTestInput() {
+         q.push_back({t, e});
+         e.type = SDL_EVENT_MOUSE_BUTTON_UP;
+         e.button.down = false;
+-        q.push_back({t + 0.08, e});
++        // Optional hold time: games that run a short modal loop after a
++        // press can drop a release that comes too soon.
++        q.push_back({t + (n >= 4 ? std::atof(b) : 0.08), e});
+       } else if (c == "key" && n >= 3) {
+         SDL_Scancode sc = SDL_GetScancodeFromName(a);
+         if (sc == SDL_SCANCODE_UNKNOWN) {
+@@ -1042,8 +1117,17 @@ void DeliverHostEvent(const SDL_Event& e) {
+ void PumpHostEvents() {
+   if (!g_sdl_up || !OnMainThread()) return;
+   InjectTestStall();
++  // Games that poll (PeekMessage in a busy loop, one timer callback per
++  // pass) call this thousands of times a second; on macOS each poll runs
++  // the Cocoa event loop, which then takes most of their time and slows
++  // their timers down. The host queue is drained at most once a
++  // millisecond; messages already queued for the game are unaffected.
++  static uint64_t last_poll_ns = 0;
++  const uint64_t now_ns = SDL_GetTicksNS();
++  const bool poll = now_ns - last_poll_ns >= 1000000;
++  if (poll) last_poll_ns = now_ns;
+   SDL_Event e;
+-  while (SDL_PollEvent(&e)) {
++  while (poll && SDL_PollEvent(&e)) {
+     // Automated runs take input only from <ID>_TEST_INPUT: their windows
+     // are on someone's desktop and stray clicks must not drive them.
+     if (Background() && (e.type == SDL_EVENT_MOUSE_MOTION ||
+@@ -1385,7 +1469,17 @@ HLE("user32.dll", CloseWindow, 1) {
+ }
+ 
+ HLE("user32.dll", UpdateWindow, 1) { return 1; }
+-HLE("user32.dll", InvalidateRect, 3) { return 1; }
++// (hwnd, RECT* or null, erase); a null hwnd invalidates every window.
++HLE("user32.dll", InvalidateRect, 3) {
++  uint32_t hwnd = Arg(c, 0), r = Arg(c, 1);
++  int32_t rect[4];
++  if (r)
++    for (int i = 0; i < 4; i++) rect[i] = int32_t(Rd32(r + 4 * i));
++  std::lock_guard<std::recursive_mutex> l(g_mu);
++  for (auto& [h, w] : g_windows)
++    if (!w.destroyed && (!hwnd || h == hwnd)) Invalidate(w, r ? rect : nullptr);
++  return 1;
++}
+ 
+ HLE("user32.dll", IsWindowVisible, 1) {
+   std::lock_guard<std::recursive_mutex> l(g_mu);
+@@ -2079,7 +2173,8 @@ HLE("user32.dll", MsgWaitForMultipleObjects, 5) {
+   // Wait for objects or for any queued input/message (wake mask ignored).
+   uint32_t n = Arg(c, 0), arr = Arg(c, 1), wait_all = Arg(c, 2),
+            timeout = Arg(c, 3);
+-  uint32_t wfm = ProcAddress(ModuleHandle("kernel32.dll"), "WaitForMultipleObjects");
++  // Looked up once: polling games call this every pass of their loop.
++  static const uint32_t wfm = ProcAddress(ModuleHandle("kernel32.dll"), "WaitForMultipleObjects");
+   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+   for (;;) {
+     PumpHostEvents();
+@@ -2195,7 +2290,7 @@ HLE("user32.dll", ClipCursor, 1) {
+     }
+   }
+   if (release && release != grab) SDL_SetWindowRelativeMouseMode(release, false);
+-  if (grab && !Background()) SDL_SetWindowRelativeMouseMode(grab, true);
++  if (grab && !Background() && !Game().own_cursor) SDL_SetWindowRelativeMouseMode(grab, true);
+   return 1;
+ }
+ 
+@@ -2287,9 +2382,17 @@ HLE("user32.dll", ChangeDisplaySettingsA, 2) {
+ HLE("user32.dll", GetDC, 1) { return DcForWindow(Arg(c, 0)); }
+ HLE("user32.dll", ReleaseDC, 2) { return 1; }
+ HLE("user32.dll", BeginPaint, 2) {
+-  uint32_t ps = Arg(c, 1), dc = DcForWindow(Arg(c, 0));
++  uint32_t hwnd = Arg(c, 0), ps = Arg(c, 1), dc = DcForWindow(hwnd);
+   std::memset(GPtr(ps), 0, 64);
+   Wr32(ps, dc);
++  // rcPaint: the update region taken with this WM_PAINT (or, painting
++  // outside one, what is pending), which is now valid.
++  std::lock_guard<std::recursive_mutex> l(g_mu);
++  if (Window* w = Win(hwnd)) {
++    const int32_t* r = w->paint ? w->inv : w->painting;
++    for (int i = 0; i < 4; i++) Wr32(ps + 8 + 4 * i, uint32_t(r[i]));
++    w->paint = false;
++  }
+   return dc;
+ }
+ HLE("user32.dll", EndPaint, 2) { return 1; }
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 7149d71..7ce3d18 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -33,6 +33,8 @@ struct GameConfig {
+   // paths with the root abbreviated: "HKLM\Software\...".
+   struct RegistryString {
+     std::string key, name, value;
++    // REG_SZ (1), or REG_DWORD (4) with `value` its decimal number.
++    uint32_t type = 1;
+   };
+   std::vector<RegistryString> registry;
+ 
+@@ -56,6 +58,12 @@ struct GameConfig {
+     Exclusive,  // fullscreen in the host display mode closest to the game's
+   };
+   Fullscreen fullscreen = Fullscreen::Desktop;
++  // Games with a desktop-style cursor of their own in exclusive mode: they
++  // draw it at the position they read (GetCursorPos, mouse messages) and
++  // never re-centre it. Their pointer then follows the host pointer
++  // absolutely instead of by relative motion, the host pointer is never
++  // grabbed, and it is hidden over the game's windows.
++  bool own_cursor = false;
+ 
+   // Video memory DirectDraw reports, in MB. Games pick detail settings
+   // from it; a game's best profile may need more than the default.
+diff --git a/tools/lifter/emit.cpp b/tools/lifter/emit.cpp
+index 6d451b9..39f5e66 100644
+--- a/tools/lifter/emit.cpp
++++ b/tools/lifter/emit.cpp
+@@ -3039,13 +3039,21 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
+       }
+     }
+   }
+-  if (resumable)
++  if (resumable) {
++    // A resume site in this function throws with the target frame's EBP
++    // already loaded (VC6 _JumpToContinuation: `mov ebp, [ebp-4]` then
++    // `jmp eax`, and it writes fs:[0] too): that throw is never for this
++    // activation, whose locals then hold the target's EBP by coincidence.
++    std::string own;
++    for (const auto& [va, in] : f.insns)
++      if (p_.resume_sites.count(va)) own += Fmt(" || r.from == 0x%llXu", U(va));
+     o += std::string("  } catch (const ::recomp::GuestResume& r) {\n") +
+-         (p_.x64 ? "    if (r.ebp != EF) throw;  // another activation's frame\n"
+-                 : "    if (r.ebp != ebp) throw;  // another activation's frame\n") +
++         (p_.x64 ? "    if (r.ebp != EF" + own + ") throw;  // another activation's frame\n"
++                 : "    if (r.ebp != ebp" + own + ") throw;  // another activation's frame\n") +
+          "    ::recomp::Resume(c, r);\n"
+          "    return;\n"
+          "  }\n";
++  }
+   o += "}\n\n";
+ }
+ 
+diff --git a/tools/lifter/program.cpp b/tools/lifter/program.cpp
+index 99a25fd..7e220b1 100644
+--- a/tools/lifter/program.cpp
++++ b/tools/lifter/program.cpp
+@@ -98,8 +98,14 @@ bool Program::Load(const std::string& path, const std::string& symdir,
+ 
+   if (!ReadTsv(symdir + "/jumptables.tsv", [&](const auto& c) {
+         if (c.size() < 2 || c[1].empty()) return;
+-        auto& t = jumptables[Hex(c[0]) + delta];
+-        for (const auto& s : Split(c[1], ',')) t.push_back(Hex(s) + delta);
++        // Ghidra sometimes exports a table it misread (targets outside the
++        // code): drop those, so the lifter recovers the table itself.
++        std::vector<uint64_t> t;
++        for (const auto& s : Split(c[1], ',')) {
++          uint64_t target = Hex(s) + delta;
++          if (in_text(target)) t.push_back(target);
++        }
++        if (!t.empty()) jumptables[Hex(c[0]) + delta] = std::move(t);
+       }, err))
+     return false;
+ 

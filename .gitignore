@@ -1,0 +1,22 @@
+# Original game data (personal copy, never committed)
+game/iso/*
+game/extracted/*
+!game/**/.gitkeep
+# Generated / third-party
+lift/generated/*
+!lift/generated/.gitkeep
+third_party/*
+recon/ghidra/*
+!recon/ghidra/.gitkeep
+out/
+build/
+tests/runs/
+*.log
+.DS_Store
+
+# Claude Desktop worktrees live inside the repo
+.claude/
+
+# Installed test app (tools/install_app.sh), local only
+app/
+.cache/

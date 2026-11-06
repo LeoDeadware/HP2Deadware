@@ -1,0 +1,15 @@
+# Test page 1: first half of the alphabet in the title font, the rest in panel fonts.
+# 3542/3571 Options (title font, title screen), 3569 New Game (title font heading,
+# lowercase = small capitals), 3592 Select / 3578 Exit (title font buttons),
+# 4183-4185 / 4149 / 4157 slot items (panel font 0), 4119 Exit next to BACK.
+3542	АБВГҐДЕЄЖЗ
+3571	АБВГҐДЕЄЖЗ
+3569	абвгґдеєжз
+3592	ИІЇЙК
+3578	иіїйк
+4183	АБВГҐДЕЄЖЗИІЇЙКЛМНОП
+4184	РСТУФХЦЧШЩЬЮЯ ’ «» №
+4185	абвгґдеєжзиіїйклмноп
+4149	рстуфхцчшщьюя ’ —
+4157	рстуфхцчшщьюя ’ —
+4119	АБВГҐДЕЄЖЗИІЇЙКЛМНОП абвгґдеєжзиіїйклмноп

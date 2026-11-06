@@ -1,0 +1,12 @@
+# HP2_PAD_SCRIPT for phase3_flicker.sh (XInput HLE syntax: src/hle/xinput/pad_script.h).
+# New Game as in phase3_new_game.pad; in the Burrow yard a short tap turns
+# Harry in place, then the camera eases round behind him for ~2 s with the
+# yard's paving (grass patches) and the house in view: the moment the user
+# saw decals flicker.
+450 press A
+520 press DOWN 4
+540 press DOWN 4
+560 press DOWN 4
+600 press A
+700 press A
+6000 stick L 0.6 -0.2 10

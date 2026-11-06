@@ -1,0 +1,12 @@
+# menu navigation sounds
+700 press DOWN
++40 press UP
++40 press DOWN
++40 press UP
++40 press DOWN
++40 press UP
++40 press DOWN
++40 press A
++90 press B
++60 press DOWN
++40 press UP

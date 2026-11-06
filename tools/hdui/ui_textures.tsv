@@ -1,0 +1,39 @@
+# HD UI pack: game textures to replace (key = the D3D8 HLE's content hash,
+# as HP2_HDUI_DUMP names them). mode: art = Real-ESRGAN x4 (anime model) +
+# hdfix join (smooth tone correction to the original); ink = the same without
+# the correction (text: the model's clean edges win); photo = the general
+# model (painted / photographic panels) + correction.
+# Found with HP2_HDUI_DUMP + HP2_HDUI_PROBE (title, slots, level 1 HUD, pause,
+# inventory; tools/loc/test_page.pad). Font atlases twice: as on the disc and
+# as tools/loc/build_mod.py uk extends them (Cyrillic; mods/uk mounted).
+# hash	mode	size	name
+0a5b1608f69e745c	art	256x256	parchment scroll (panels)
+0de036137c994c54	art	16x32	green bar (meter)
+5570861a7d3f9bb9	art	16x32	green bar (meter, 2)
+1b24179cbb6c7fe6	art	256x256	inventory icons
+1f8da0c9ab9c34bd	art	32x32	B button
+4365bf507e4eb6b5	art	32x32	A button
+e0f21bd8842274a2	art	128x128	X/Y/A/B cluster
+18d6fed19f5c2669	art	128x128	action icon: hand on a gold disc
+26945ee7652212db	art	64x128	crescent meter (rainbow)
+71e38f92b75edc5a	art	64x128	crescent meter (pink)
+8ed9b32bd4740d41	art	64x128	crescent meter (blue)
+a215bb7e94ba9f11	art	32x64	lightning bolt
+5be282c1a9c99374	art	64x64	glass sphere
+70ab899ec4e4aa96	art	16x32	frame piece (bar)
+8f055e305bde2b58	art	16x32	frame piece (end)
+2630be27269fcdcd	art	64x8	dotted line
+42850d05a817f364	art	256x512	HP logo (title, part)
+9dab678b54815289	art	256x512	HP logo (title, part 2)
+fd8b3e32203cb584	art	128x512	HP logo (title, part 3)
+867ef85b7ea295d8	art	128x128	HP logo (menus)
+4e980b7bdcf4a75e	ink	256x128	font atlas (panel, white)
+b5b04c9fd68636d5	ink	256x256	font atlas (panel, with button glyphs)
+cede9eb6b834a6fd	ink	256x128	font atlas (gold title)
+db6438f86d1e78b4	ink	512x256	font atlas (gold, large)
+e172c606e8ab16a1	ink	256x512	font atlas (panel, with button glyphs) + Cyrillic (mods/uk)
+cf7102ed3ca9f98f	ink	256x256	font atlas (panel, white) + Cyrillic (mods/uk)
+770e7a5968891000	ink	256x256	font atlas (gold title) + Cyrillic (mods/uk)
+61666e79e19f0c1b	ink	512x512	font atlas (gold, large) + Cyrillic + language flags (mods/uk)
+ba7923982905e12c	photo	256x512	slot screen panel (left)
+dbfe9070b60843ef	photo	256x512	slot screen panel (right)

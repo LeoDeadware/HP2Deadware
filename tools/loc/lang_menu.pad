@@ -1,0 +1,8 @@
+# Language picker (tests/scripts/loc_lang_menu.sh): main menu -> Options
+# (second item) -> first row = language -> flags.
+450 press DOWN
+480 press A
+580 press UP
+600 press A
+700 press RIGHT
+760 press DOWN

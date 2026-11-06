@@ -1,0 +1,52 @@
+speaker	voice_id	model	stability	similarity	pitch	name	character	core_tag	notes
+HRY	drOVtcvHhJKNEXv5h1l5	eleven_v3	0.5		2	Harry	12-year-old boy; brave, modest, curious, a bit wry; earnest, never cocky	earnest, expressive	chosen 2026-10-31: Vladislav, +2 semitones; clips 657, mapped uk chars ~10109
+RON	upV1WVQQOkwfYxJITYqG	eleven_v3	0.0			Ron	12-year-old boy; goofy, funny, loyal, easily scared, cheeky; jokes even when frightened	excitable, panicky, comic	chosen 2026-10-31: Horpyna, take A (stability 0, cheeky/playful tags, laughs); clips 223, mapped uk chars ~6661
+MP1	g1G73EpCIdK4HUyDiLYF	eleven_v3	0.5		2	male pupil	Hogwarts boy pupil		minor role, no audition: Egor +2 (boy pupils); clips 192, mapped uk chars ~5588
+FP1	96XEXOjZRHooATdYA8FY	eleven_v3	0.5			female pupil	Hogwarts girl pupil		minor role, no audition: Sofiia (girl pupils); clips 187, mapped uk chars ~5572
+MT1	srULqtwUV9XZPg1ZCO5w	eleven_v3	0.5			prefect	prefect on patrol; stern, officious	officious	minor role, no audition: Kyrylo (prefect); clips 192, mapped uk chars ~4379
+HER	VRgXeW5yzeo9Vlv0JZ1A	eleven_v3	0.0			Hermione	12-year-old girl; know-it-all, bossy, quick and precise, but warm and loyal	bossy, quick, eager	chosen 2026-10-31: Daryna Holub; clips 85, mapped uk chars ~4261
+HGD	0shy4vslErI9HlLa0egX	eleven_v3	0.0			Hagrid	half-giant gamekeeper; huge, warm, rough West Country speech, soft-hearted, blurts secrets	big-hearted, loud, warm	chosen 2026-10-31: Father Teodor; clips 100, mapped uk chars ~2704
+GRG	NzxZZhrUg9MwxGQtQRFf	eleven_v3	0.0		-2	George	George Weasley, 14; mischievous prankster, quick jokes, grinning; twin of Fred	cheeky, mischievous, grinning	chosen 2026-10-31: Marichka (pitch TBD); clips 90, mapped uk chars ~1765
+TMR	gXMhWmiqsFkrcssqVb5k	eleven_v3	0.5			Tom Riddle	Tom Riddle, 16; aristocratic, arrogant, refined and charming on the surface; cold, superior and menacing underneath	charming, cold, menacing	chosen 2026-10-31: Valery (haughty core); clips 28, mapped uk chars ~1517
+NAR	ta2xccT3m6yUvQHwyztQ	eleven_v3	0.5			Narrator	storybook narrator; warm, clear, engaging	storytelling, warm, vivid	chosen 2026-10-31: Odynak Taras; clips 17, mapped uk chars ~1504
+DRC	bg9LrEYQkRYwqkxA8VOy	eleven_v3	0.0		2	Draco	12-year-old boy; spoiled pure-blood, drawling, sneering, cowardly bully	sneering, drawling, spoiled	chosen 2026-10-31: Leonid Fomichev +2; clips 57, mapped uk chars ~1503
+GIL	hWHihsTve3RbzG4PHDBQ	eleven_v3	0.0			Lockhart	celebrity teacher; vain, theatrical, self-adoring, patronising, all charm and no substance	theatrical, self-adoring, showy	chosen 2026-10-31: Andriy Tkachenko; clips 40, mapped uk chars ~1293
+OWD	DzIJqawfETuCQYOtJWn6	eleven_v3	0.0			Oliver Wood	Oliver Wood, Quidditch captain; intense, obsessive about Quidditch, fired up	fired up, intense	chosen 2026-10-31: Rostyslav; clips 100, mapped uk chars ~1162
+MOL	nCqaTnIbLdME87OuQaZY	eleven_v3	0.0			Molly Weasley	Ron's mother; warm, fussy, motherly, flustered, fierce when worried	motherly, fussing, emotional	chosen 2026-10-31: Vira; clips 41, mapped uk chars ~1041
+DUM	9AjtU6o19uipv7QL8dLL	eleven_v3	0.5			Dumbledore	very old headmaster; calm, wise, gentle, playful and amused, a twinkle of humour, never raises his voice	warm, calm, twinkling	chosen 2026-10-31: Alex; clips 41, mapped uk chars ~985
+HCH	4m9JlYe3SXVOj4qPhtRN	eleven_v3	0.5			Madam Hooch	flying instructor; brisk, hawk-like, sharp, impatient	brisk, sharp	minor role, no audition: Veselyna (brisk, sharp); clips 38, mapped uk chars ~935
+FRD	NzxZZhrUg9MwxGQtQRFf	eleven_v3	0.0		-1	Fred	Fred Weasley, 14; mischievous prankster, quick jokes, grinning, confident	cheeky, mischievous, grinning	chosen 2026-10-31: Marichka (pitch TBD); clips 92, mapped uk chars ~914
+GIN	a30ekmfK56EKHR341YaO	eleven_v3	0.0			Ginny	11-year-old girl; shy, adoring of Harry, blushes, quiet; later frightened and haunted	shy, breathless	chosen 2026-10-31: Torri Miles; clips 54, mapped uk chars ~892
+AS1	5nGIpKQWEmhylnRK4h9b	eleven_v3	0.5			shop assistant 1	Magical Menagerie keeper; grumpy, muttering	grumpy	minor role, no audition: Pavlo (grumpy shopkeeper); clips 38, mapped uk chars ~830
+PCY	zp2G1GqPvAg5KDA55fjC	eleven_v3	0.0			Percy	Percy Weasley, prefect; pompous, rule-bound, self-important	pompous, self-important	chosen 2026-10-31: Loardar; clips 28, mapped uk chars ~693
+MYR	GN4wbsbejSnGSa1AzjH5	eleven_v3	0.0		2	Moaning Myrtle	Moaning Myrtle, ghost girl; whiny, self-pitying, moody, shrieks and sobs	whiny, dramatic, sobbing	chosen 2026-10-31: Ekaterina (shriller TBD); clips 14, mapped uk chars ~627
+NEV	l0FRhtyn0AKRYadUAdgv	eleven_v3	0.0			Neville	12-year-old boy; timid, clumsy, nervous, kind	timid, nervous	chosen 2026-10-31: Antonina; clips 26, mapped uk chars ~584
+SNP	iEmO1KNYMPBds0Zul8Pm	eleven_v3	0.5			Snape	Potions master; cold, slow, silky, contemptuous, menacing quiet voice, sneers at Harry	cold, slow, menacing	chosen 2026-10-31: Yarema Haidamak; clips 19, mapped uk chars ~525
+WZ2	FqTvupDLWXjo91Dte1vR	eleven_v3	0.5			wizard 2			minor role, no audition: Kate (gushing witch); clips 31, mapped uk chars ~503
+FLT	YCBNvFrJ61cZtOtAFMzZ	eleven_v3	0.0		4	Flitwick	tiny Charms professor; squeaky, excitable, kindly, enthusiastic	squeaky, excited	minor role, no audition: Illia +4 (tiny, squeaky); clips 12, mapped uk chars ~483
+WZ1	9oLzyMRRRWl0OdCCVwlU	eleven_v3	0.5			wizard 1			minor role, no audition: Pavlo Lysenko (jovial old wizard); clips 38, mapped uk chars ~429
+MCG	vbYzejKFdVWBi2DaQGhQ	eleven_v3	0.5			McGonagall	elderly Transfiguration professor; strict, crisp, supremely self-assured, Scottish, fair but stern	crisp, stern	chosen 2026-10-31: Natalia; clips 17, mapped uk chars ~411
+LUC	Ntd0iVwICtUtA6Fvx27M	eleven_v3	0.5			Lucius Malfoy	Draco's father; aristocratic, cold, arrogant, condescending, silky contempt	haughty, icy, contemptuous	chosen 2026-10-31: Evgeniy Shevchenko; clips 6, mapped uk chars ~407
+LUV	Ntd0iVwICtUtA6Fvx27M	eleven_v3	0.5			Lucius? (guess)	Lucius Malfoy as school governor; aristocratic, cold, arrogant, smug	haughty, icy, contemptuous	minor role, no audition: Evgeniy Shevchenko (= Lucius); clips 4, mapped uk chars ~297
+NHN	dZde1M1SiLkAKiqjpqqT	eleven_v3	0.0			Nearly Headless Nick	Nearly Headless Nick, ghost; posh, courteous, melancholic, a little theatrical	posh, theatrical	minor role, no audition: Anton (posh ghost); clips 11, mapped uk chars ~232
+SOR	jn6ifzU1eO5tfUZ2ZJVg	eleven_v3	0.5			Sorting Hat?	Sorting Hat; old, musing, mysterious, slightly amused	musing	minor role, no audition: Bogdan (Sorting Hat); clips 1, mapped uk chars ~155
+DIG	S80713fa2M70CssGEBj5	eleven_v3	0.0		2	Dedalus Diggle?	Dedalus Diggle; excitable, star-struck little wizard	excitable	minor role, no audition: Maks Tsukrenko +2 (excitable); clips 5, mapped uk chars ~153
+GOY	tsYZxMRqpm0LKWcugf1k	eleven_v3	0.5		1	Goyle	Goyle; dim, slow, grunting thug	dim, grunting	minor role, no audition: Ostap +1 (dim thug); clips 10, mapped uk chars ~136
+BAS	11JUpgNlQsWfppULB2T8	eleven_v3	0.5		-3	?	basilisk voice in the walls; hissing whisper, monstrous	hissing, monstrous whisper	minor role, no audition: Taras Vovk -3 (basilisk); clips 7, mapped uk chars ~124
+BOR	wbOzdlpZLfFeuT2HYSU1	eleven_v3	0.0			Borgin	Borgin, Knockturn Alley dealer; oily, obsequious, sly, greedy	oily, fawning, sly	chosen 2026-10-31: Valerii Kharchuk; clips 8, mapped uk chars ~106
+FAT	7NEjtweQMPrrrzXYKNvs	eleven_v3	0.5			Fat Lady	Fat Lady portrait; haughty, theatrical	haughty	minor role, no audition: Oksana (Fat Lady); clips 2, mapped uk chars ~96
+HG1	0shy4vslErI9HlLa0egX	eleven_v3	0.5		1	hag	young Hagrid in the memory; big, desperate teenager	gruff	minor role, no audition: Father Teodor (= Hagrid, young); clips 4, mapped uk chars ~85
+HAG	U4IxWQ3B5B0suleGgLcn	eleven_v3	0.5		-1	hag?			minor role, no audition: Kristi (hag); clips 13, mapped uk chars ~46
+AS2	jLAw3hCkfBKHkBd4N6Fj	eleven_v3	0.5			shop assistant 2			minor role, no audition: Ruslan Yakovenko; clips 7, mapped uk chars ~11
+ARA	WtDqMP4cPOGB6kDiLZgi	eleven_v3	0.5		-2	Aragog	Aragog, ancient giant spider; slow, rasping, old, menacing	rasping, ancient, menacing	minor role, no audition: Did Vishchun -2 (ancient spider); clips 8, mapped uk chars ~0
+GNM						gnome			clips 3, mapped uk chars ~0
+MXD	g1G73EpCIdK4HUyDiLYF	eleven_v3	0.5		2	?			minor role (unlinked lines), no audition: Egor +2
+QLV	ndzBDh5VK0dFeOP73Guh	eleven_v3	0.5			?			minor role (unlinked lines), no audition: Viacheslav Skoryk
+LEE	ZEchI3lWet1JsdNubYRY	eleven_v3	0.0			Lee Jordan (commentary, no text)	Lee Jordan, Quidditch commentator; cheeky, energetic, openly biased for Gryffindor, jokes at Slytherin	hyped sports commentator	"chosen 2026-10-31: Darth; phrases like ""Оце так гол"" hyphen-joined (joins.tsv)"
+FAB	jLAw3hCkfBKHkBd4N6Fj	eleven_v3	0.5			Flourish & Blotts clerk	harassed bookshop clerk; polite, tired	polite	minor role (unlinked lines), no audition: Ruslan Yakovenko (bookshop clerk)
+PHO						?			clips 1, mapped uk chars ~0
+GAJ	S80713fa2M70CssGEBj5	eleven_v3	0.0			Gambol & Japes keeper	joke-shop keeper; jolly, salesman	jolly	minor role (unlinked lines), no audition: Maks Tsukrenko (joke-shop keeper)
+GR1	NJGiMgVHtXSA1XYSuNKl	eleven_v3	0.5		-2	goblin	Gringotts goblin; curt, sneering, counting	curt, sneering	minor role (unlinked lines), no audition: Dmytro nasal -2 (goblin)
+DOB	YCBNvFrJ61cZtOtAFMzZ	eleven_v3	0.0		6	Dobby	house-elf; squeaky, anxious, servile, self-punishing	squeaky, anxious, servile	minor role (unlinked lines), no audition: Illia +6 (Dobby, squeaky house-elf)
+TOM	Ydkhl6Al705Uykb6EPiX	eleven_v3	0.5			Tom (barman)	Tom, old Leaky Cauldron barman; gruff, weary	weary	minor role (unlinked lines), no audition: Borys Borysov (old barman)
+MQ1	zvm1P65eFt40xSwMli2k	eleven_v3	0.0		2	?	rival Quidditch player; cocky, taunting	cocky	minor role (unlinked lines), no audition: Garry +2 (Quidditch rival)

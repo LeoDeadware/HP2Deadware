@@ -1,0 +1,12 @@
+pattern	note
+Майже\s+Безголов\w*\s+Нік\w*	Nearly Headless Nick
+Плаксив\w*\s+Мірт\w*	Moaning Myrtle
+Таємн\w*\s+[Кк]імнат\w*	Chamber of Secrets
+Діряв\w*\s+[Кк]аз\w*	Leaky Cauldron
+Войовнич\w*\s+[Вв]ерб\w*	Whomping Willow
+Гладк\w*\s+Пан\w*	Fat Lady
+Флоріш\s+і\s+Блотс\w*	Flourish and Blotts
+Ґамбол\s+і\s+Джейпс\w*	Gambol and Japes
+Борджин\w*\s+і\s+Беркс\w*	Borgin and Burkes
+Сортувальн\w*\s+[Кк]апелюх\w*	Sorting Hat
+Оце\s+так\s+\w+	Lee: "оце так гол" in one breath

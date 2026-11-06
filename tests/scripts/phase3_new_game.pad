@@ -1,0 +1,17 @@
+# HP2_PAD_SCRIPT for phase3_first_level.sh (XInput HLE syntax: src/hle/xinput/pad_script.h).
+# Frames = presented frames (D3D Swap count), movies skipped.
+# The controller is connected from boot, as for a player: the XInput HLE
+# reports it as an insertion on the first XGetDeviceChanges (the game marks a
+# port live only on an insertion; without it the level stops at "PLEASE
+# RECONNECT THE CONTROLLER TO PORT 1", which phase3_first_level.sh checks).
+# Main menu: New Game -> save slots: Continue Without Saving -> confirm Yes.
+450 press A
+520 press DOWN 4
+540 press DOWN 4
+560 press DOWN 4
+600 press A
+700 press A
+# The Burrow intro cutscene runs to ~5900. Gameplay: walk forward, turn left, walk.
+6000 stick L 0 1 90
+6150 stick L -1 0 30
+6200 stick L 0 1 100

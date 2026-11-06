@@ -1,0 +1,17 @@
+# Remembrall pages: New Game -> Burrow (as tools/loc/test_page.pad), then BACK and R through the tabs.
+450 press A
+520 press DOWN 4
+540 press DOWN 4
+560 press DOWN 4
+600 press A
+700 press A
+6000 stick L 0 1 90
+6150 stick L -1 0 30
+6200 stick L 0 1 100
+# Remembrall pages (tests/scripts/loc_uk_screens.sh out tools/loc/remembrall.pad 6560,6680,6800,6920,7040,7160)
+6500 press BACK
+6620 press RT
+6740 press RT
+6860 press RT
+6980 press RT
+7100 press RT

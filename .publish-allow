@@ -1,0 +1,2 @@
+# Exceptions to tools/publish_check.py: glob + "# reason" (secrets are never allowed).
+HP2.dmg:*/mods/hd_*  # owner's decision 2026-11-06 (Deadware/CLAUDE.md 80e5dc6, «HD у DMG»): the players' DMG in GitHub releases ships the ready HD packs (R-L5); DMCA takedown within 24 h

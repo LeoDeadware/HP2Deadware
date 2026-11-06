@@ -1,0 +1,9 @@
+# HP2_PAD_SCRIPT for wide_fight.sh: Continue -> Potter A (a save made by
+# levels_smoke.sh for row 55, the Aragog arena), then hold LT (lock on the
+# spider) and strafe right.
+0 disconnect
+1 connect
+450 press A
+600 press A
+1520 hold LT 200
+1560 stick L 1 0 80
